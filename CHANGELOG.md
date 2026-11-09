@@ -1,3 +1,13 @@
+# Unreleased fork — opt-in on-demand history recovery
+
+Patch local sobre a baseline de aplicação **2.3.7** (`cd800f2976e1e5b682fbf86a01ee4d85ae61f370`, Baileys `7.0.0-rc.9`). Não é release upstream. Sem migration e sem troca de dependência.
+
+- `POST /chat/recoverHistory/:instanceName` e `GET /chat/recoverHistoryStatus/:instanceName` pedem, no máximo, uma página de histórico mais antigo que uma âncora explícita.
+- Lotes `messaging-history.set` `ON_DEMAND` e `messages.upsert` com o id dessa solicitação não seguem webhook, chatbot, recibo ou contador de não lidas.
+- Mensagens vivas sem esse id continuam no caminho existente.
+- Linhas gravadas usam `status = HISTORY` e `message._evolutionRecovery.provenance = on-demand-history`, sem substituir timestamp, `fromMe` ou id.
+- Watcher externo que faz polling de `Message` permanece **BLOCKED** até filtrar essa proveniência. Ver `docs/history-recovery/HANDOFF.md`.
+
 # 2.3.7 (2025-12-05)
 
 ### Features

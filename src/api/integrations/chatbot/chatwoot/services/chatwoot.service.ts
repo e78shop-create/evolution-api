@@ -5,6 +5,7 @@ import { postgresClient } from '@api/integrations/chatbot/chatwoot/libs/postgres
 import { chatwootImport } from '@api/integrations/chatbot/chatwoot/utils/chatwoot-import-helper';
 import { PrismaRepository } from '@api/repository/repository.service';
 import { CacheService } from '@api/services/cache.service';
+import { withoutRecoveredHistory } from '@api/services/history-recovery/history-recovery.policy';
 import { WAMonitoringService } from '@api/services/monitor.service';
 import { Events } from '@api/types/wa.types';
 import { Chatwoot, ConfigService, Database, HttpServer } from '@config/env.config';
@@ -2676,11 +2677,11 @@ export class ChatwootService {
         .map((message) => message.source_id.replace('WAID:', ''));
 
       const savedMessages = await this.prismaRepository.message.findMany({
-        where: {
+        where: withoutRecoveredHistory({
           Instance: { name: instance.instanceName },
           messageTimestamp: { gte: Number(dayjs().subtract(6, 'hours').unix()) },
           AND: ids.map((id) => ({ key: { path: ['id'], not: id } })),
-        },
+        }),
       });
 
       const filteredMessages = savedMessages.filter(

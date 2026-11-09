@@ -15,10 +15,12 @@ import {
   UpdateMessageDto,
   WhatsAppNumberDto,
 } from '@api/dto/chat.dto';
+import { HistoryRecoveryDto } from '@api/dto/history-recovery.dto';
 import { InstanceDto } from '@api/dto/instance.dto';
 import { Query } from '@api/repository/repository.service';
 import { chatController } from '@api/server.module';
 import { Contact, Message, MessageUpdate } from '@prisma/client';
+import { historyRecoverySchema } from '@validate/history-recovery.schema';
 import {
   archiveChatSchema,
   blockUserSchema,
@@ -272,6 +274,21 @@ export class ChatRouter extends RouterBroker {
 
         return res.status(HttpStatus.OK).json(response);
       })
+      .post(this.routerPath('recoverHistory'), ...guards, async (req, res) => {
+        const response = await this.dataValidate<HistoryRecoveryDto>({
+          request: req,
+          schema: historyRecoverySchema,
+          ClassRef: HistoryRecoveryDto,
+          execute: (instance, data) => chatController.recoverHistory(instance, data),
+        });
+        return res.status(response?.httpStatus ?? HttpStatus.OK).json(stripHttpStatus(response));
+      })
+      .get(this.routerPath('recoverHistoryStatus'), ...guards, async (req, res) => {
+        const instance = req.params as unknown as InstanceDto;
+        const requestId = typeof req.query.requestId === 'string' ? req.query.requestId : '';
+        const response = await chatController.recoverHistoryStatus(instance, requestId);
+        return res.status(response?.httpStatus ?? HttpStatus.OK).json(stripHttpStatus(response));
+      })
       .post(this.routerPath('updatePrivacySettings'), ...guards, async (req, res) => {
         const response = await this.dataValidate<PrivacySettingDto>({
           request: req,
@@ -285,4 +302,13 @@ export class ChatRouter extends RouterBroker {
   }
 
   public readonly router: Router = Router();
+}
+
+function stripHttpStatus<T>(response: T): T {
+  if (!response || typeof response !== 'object' || !('httpStatus' in response)) {
+    return response;
+  }
+  const clone = { ...(response as Record<string, unknown>) };
+  delete clone.httpStatus;
+  return clone as T;
 }

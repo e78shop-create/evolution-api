@@ -14,6 +14,7 @@ import {
   UpdateMessageDto,
   WhatsAppNumberDto,
 } from '@api/dto/chat.dto';
+import { HistoryRecoveryDto } from '@api/dto/history-recovery.dto';
 import { InstanceDto } from '@api/dto/instance.dto';
 import { Query } from '@api/repository/repository.service';
 import { WAMonitoringService } from '@api/services/monitor.service';
@@ -112,5 +113,35 @@ export class ChatController {
 
   public async blockUser({ instanceName }: InstanceDto, data: BlockUserDto) {
     return await this.waMonitor.waInstances[instanceName].blockUser(data);
+  }
+
+  public async recoverHistory({ instanceName }: InstanceDto, data: HistoryRecoveryDto): Promise<any> {
+    const waInstance = this.waMonitor.waInstances[instanceName] as {
+      recoverMessageHistory?: (body: HistoryRecoveryDto) => Promise<any>;
+    };
+    if (!waInstance?.recoverMessageHistory) {
+      return {
+        httpStatus: 503,
+        status: 'unavailable',
+        error: 'Recuperação de histórico está disponível apenas no canal Baileys desta baseline.',
+        verification: { liveWhatsAppExecution: false },
+        integration: { externalDbPoller: { status: 'BLOCKED' } },
+      };
+    }
+    return waInstance.recoverMessageHistory(data);
+  }
+
+  public async recoverHistoryStatus({ instanceName }: InstanceDto, requestId: string): Promise<any> {
+    const waInstance = this.waMonitor.waInstances[instanceName] as {
+      recoverMessageHistoryStatus?: (id: string) => any;
+    };
+    if (!waInstance?.recoverMessageHistoryStatus) {
+      return {
+        httpStatus: 503,
+        status: 'unavailable',
+        error: 'Recuperação de histórico está disponível apenas no canal Baileys desta baseline.',
+      };
+    }
+    return waInstance.recoverMessageHistoryStatus(requestId);
   }
 }

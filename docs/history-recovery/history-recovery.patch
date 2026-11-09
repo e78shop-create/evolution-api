@@ -1,0 +1,2984 @@
+diff --git a/.gitignore b/.gitignore
+index 768d8afa..469aaa0e 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -34,7 +34,8 @@ lerna-debug.log*
+ # Project related
+ /instances/*
+ !/instances/.gitkeep
+-/test/
++/test/*
++!/test/history-recovery/
+ /src/env.yml
+ /store
+ *.env
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 5102b537..557b0f87 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -1,3 +1,13 @@
++# Unreleased fork — opt-in on-demand history recovery
++
++Patch local sobre a baseline de aplicação **2.3.7** (`cd800f2976e1e5b682fbf86a01ee4d85ae61f370`, Baileys `7.0.0-rc.9`). Não é release upstream. Sem migration e sem troca de dependência.
++
++- `POST /chat/recoverHistory/:instanceName` e `GET /chat/recoverHistoryStatus/:instanceName` pedem, no máximo, uma página de histórico mais antigo que uma âncora explícita.
++- Lotes `messaging-history.set` `ON_DEMAND` e `messages.upsert` com o id dessa solicitação não seguem webhook, chatbot, recibo ou contador de não lidas.
++- Mensagens vivas sem esse id continuam no caminho existente.
++- Linhas gravadas usam `status = HISTORY` e `message._evolutionRecovery.provenance = on-demand-history`, sem substituir timestamp, `fromMe` ou id.
++- Watcher externo que faz polling de `Message` permanece **BLOCKED** até filtrar essa proveniência. Ver `docs/history-recovery/HANDOFF.md`.
++
+ # 2.3.7 (2025-12-05)
+ 
+ ### Features
+diff --git a/docs/history-recovery/BOT_NOTICE.md b/docs/history-recovery/BOT_NOTICE.md
+new file mode 100644
+index 00000000..be0a9f79
+--- /dev/null
++++ b/docs/history-recovery/BOT_NOTICE.md
+@@ -0,0 +1,17 @@
++# BOT_NOTICE
++
++Este patch foi escrito por um agente de código no fork público `e78shop-create/evolution-api`, contra a baseline de aplicação 2.3.7 (`cd800f2976e1e5b682fbf86a01ee4d85ae61f370`) e Baileys `7.0.0-rc.9`.
++
++Não é merge upstream. Não foi executado em WhatsApp, não leu sessão, não enviou mensagem e não tocou em banco.
++
++Limites que o texto deste repositório não pode ultrapassar:
++
++- Recuperação é opt-in, uma conversa por chamada, âncora fornecida pelo operador.
++- O protocolo pedido é o on-demand do Baileys, direção mais antiga que a âncora. Pode voltar vazio, parcial ou estourar o timeout.
++- Nenhum corpo é inventado para preencher a janela da indisponibilidade.
++- Histórico correlacionado não segue o caminho de mensagem nova deste processo.
++- Mensagem viva concorrente continua no caminho antigo.
++- O watcher externo de polling em `Message` não foi alterado. Até ele excluir `message._evolutionRecovery.provenance = on-demand-history` e `status = HISTORY`, a implantação de ponta a ponta está **BLOCKED**.
++- `verification.liveWhatsAppExecution` é falso. Não anuncie restauração concluída.
++
++Reload do processo exige aprovação explícita do dono. Veja `DEPLOY.md`.
+diff --git a/docs/history-recovery/DEPLOY.md b/docs/history-recovery/DEPLOY.md
+new file mode 100644
+index 00000000..8cf7449c
+--- /dev/null
++++ b/docs/history-recovery/DEPLOY.md
+@@ -0,0 +1,71 @@
++# Deploy e rollback — instalação source 2.3.7 sem git
++
++Não execute estes passos até o dono aprovar o reload. Este patch não foi aplicado numa instância em execução. Não há tempo de indisponibilidade medido. O efeito esperado de um restart é só o da API: os sockets Baileys reconectam quando o processo volta. PostgreSQL e os arquivos de sessão não são alvo deste procedimento.
++
++Não há migration. Não altere `syncFullHistory`. Não faça logout, reset, limpeza de sessão ou wipe.
++
++## Antes de copiar arquivos
++
++Na máquina da instalação, com o processo ainda no ar:
++
++```bash
++cd /caminho/da/instalacao
++cp package.json package.json.bak-pre-history-recovery
++cp package-lock.json package-lock.json.bak-pre-history-recovery
++tar -czf "$HOME/evolution-src-pre-history-recovery.tgz" src
++tar -czf "$HOME/evolution-dist-pre-history-recovery.tgz" dist
++# node_modules só se você for trocar dependências. Este patch não troca.
++# tar -czf "$HOME/evolution-node_modules-pre-history-recovery.tgz" node_modules
++```
++
++Confirme a baseline antes de aplicar:
++
++```bash
++node -p "require('./package.json').version"          # esperado: 2.3.7
++node -p "require('./package.json').dependencies.baileys"  # esperado: 7.0.0-rc.9
++node -v                                                 # esperado: 20.x na instalação descrita
++```
++
++Se `src/api/integrations/channel/whatsapp/whatsapp.baileys.service.ts` tiver patches locais não publicados, não substitua o arquivo inteiro. Reaplique o trecho deste diff por cima desses patches. O diff sanitizado está em `docs/history-recovery/history-recovery.patch`.
++
++Preserve o bind atual. Este patch não altera host, porta nem `SERVER_URL`. Se a instalação escuta em localhost, continue escutando em localhost.
++
++## Aplicar
++
++Copie somente os arquivos do diff. Não rode `npm update`. O `package.json` deste fork só ganha o script `test:history-recovery`. Dependências não mudam.
++
++```bash
++export DATABASE_PROVIDER=postgresql
++npm run db:generate
++npm run test:history-recovery
++npm run build
++```
++
++`db:generate` regenera o client a partir do schema que já existe. Não rode migrate. Se o build falhar, pare e restaure o backup. Não reinicie o processo.
++
++## Reload
++
++Só com aprovação explícita do dono. O restart derruba as conexões Baileys desta API até o processo voltar a abrir os sockets. Sessão em disco ou no PostgreSQL permanece. Não há número medido de segundos.
++
++Depois do processo no ar, use só `--dry-run` na primeira conversa. A solicitação real é outra decisão do dono. Uma conversa por vez.
++
++## Rollback
++
++Com o processo parado somente se o dono já tiver aprovado parar:
++
++```bash
++rm -rf src dist
++tar -xzf "$HOME/evolution-src-pre-history-recovery.tgz"
++tar -xzf "$HOME/evolution-dist-pre-history-recovery.tgz"
++cp package.json.bak-pre-history-recovery package.json
++cp package-lock.json.bak-pre-history-recovery package-lock.json
++```
++
++Se `node_modules` não foi trocado, não restaure esse tar. Suba o processo antigo só após nova aprovação. Linhas `HISTORY` já gravadas, se alguma solicitação real tiver ocorrido, permanecem no PostgreSQL. O rollback de código não as apaga. O watcher, se ainda não filtra proveniência, continuaria vendo essas linhas. Não delete mensagens como parte do rollback.
++
++## O que não fazer
++
++- Não ligar `syncFullHistory`.
++- Não chamar logout, restart de sessão ou delete de instância.
++- Não apontar a atualização para o upstream `evolution-foundation/evolution-api`.
++- Não tratar `counts.persisted > 0` como recuperação completa da queda.
+diff --git a/docs/history-recovery/HANDOFF.md b/docs/history-recovery/HANDOFF.md
+new file mode 100644
+index 00000000..69c6997c
+--- /dev/null
++++ b/docs/history-recovery/HANDOFF.md
+@@ -0,0 +1,63 @@
++# Handoff — recuperação de histórico por conversa
++
++Baseline de aplicação: Evolution API **2.3.7**, commit `cd800f2976e1e5b682fbf86a01ee4d85ae61f370`, Baileys **7.0.0-rc.9**. O `main` deste fork, no branch de origem `fa09d378`, só tinha commits de documentação sobre essa tag.
++
++Este handoff é para o dono da instalação. Nenhum teste daqui falou com WhatsApp.
++
++## O que foi entregue
++
++Uma recuperação **opt-in**, de **uma conversa por chamada**, com âncora explícita. A API pede ao Baileys `fetchMessageHistory` uma única vez. O lote que voltar por `messaging-history.set` (`ON_DEMAND`) ou por `messages.upsert` com o mesmo id de sessão é gravado com a data, `fromMe` e id originais, ou descartado se não tiver corpo. Não há corpo fabricado.
++
++Mensagens vivas que chegam ao mesmo tempo, sem esse id de sessão, seguem o webhook e as integrações de hoje.
++
++## O que não foi provado
++
++Não houve execução contra um aparelho, sessão ou banco de produção. `verification.liveWhatsAppExecution` permanece `false`. Um status `received` em produção, no futuro, ainda será só a observação de um lote. Não fecha a janela da indisponibilidade.
++
++O protocolo só busca mensagens **mais antigas** que a âncora. Reconectar com `syncFullHistory=false` continua igual. Este patch não liga sync completo e não varre conversas.
++
++## BLOCKER
++
++O watcher externo que lê `Message` por polling precisa ignorar:
++
++```sql
++COALESCE(message->'_evolutionRecovery'->>'provenance', '') <> 'on-demand-history'
++AND COALESCE(status, '') <> 'HISTORY'
++```
++
++Sem essa alteração no watcher, **não aplique** a recuperação em produção se esse processo trata linha nova como mensagem nova. O código da API não desliga o watcher nem os webhooks das mensagens vivas. Deploy de ponta a ponta: **BLOCKED** até essa integração existir.
++
++Chatwoot `syncLostMessages` neste repositório já ignora `status = HISTORY`. Isso não cobre o watcher externo.
++
++## Como operar uma conversa
++
++1. Escolha uma conversa e uma mensagem âncora que o telefone conhece, mais nova que o trecho desejado.
++2. Rode a CLI com `--dry-run`. Ela só valida e mostra o que seria enviado.
++3. Se o dry-run estiver coerente, repita sem `--dry-run` e com `--poll`.
++4. Leia `counts` e `status`. Vazio, parcial e timeout são resultados reais possíveis.
++5. Outra conversa, ou a página mais antiga da mesma conversa, é outra invocação. Não há fila automática.
++
++Aprovação explícita do dono é obrigatória antes de qualquer reload do processo. Veja `DEPLOY.md`.
++
++## Comandos de verificação deste patch
++
++```bash
++npm run test:history-recovery
++npx eslint --ext .ts src/api/services/history-recovery src/cli/recover-history.ts src/api/routes/chat.router.ts src/api/controllers/chat.controller.ts
++```
++
++Resultado nesta sessão: 17 testes, 0 falhas. ESLint dos arquivos tocados sem erro.
++
++`npx tsc --noEmit` neste ambiente ainda acusa `@prisma/client` sem generate (`DATABASE_PROVIDER` não foi usado; generate e migrate não foram executados). Esses erros também aparecem em controllers que este patch não alterou. Na instalação do dono, com o client já gerado:
++
++```bash
++export DATABASE_PROVIDER=postgresql
++npm run db:generate
++npm run build
++```
++
++`db:generate` não é migrate. Não rode `db:deploy` por causa deste patch: não há migration.
++
++## Rollback
++
++Restaure o backup de `src/` e `dist/` descrito em `DEPLOY.md`. Não apague sessão nem banco para desfazer este patch.
+diff --git a/docs/history-recovery/SYSTEM_INDEX.md b/docs/history-recovery/SYSTEM_INDEX.md
+new file mode 100644
+index 00000000..f251edcc
+--- /dev/null
++++ b/docs/history-recovery/SYSTEM_INDEX.md
+@@ -0,0 +1,110 @@
++# SYSTEM_INDEX — recuperação opt-in de histórico (baseline 2.3.7)
++
++Mapa do patch. Não é um resultado de execução contra WhatsApp.
++
++## Baseline identificada
++
++| Item | Valor |
++| --- | --- |
++| Tag | `2.3.7` |
++| Commit da tag | `cd800f2976e1e5b682fbf86a01ee4d85ae61f370` |
++| `package.json` version | `2.3.7` |
++| Fork `main` no momento do branch | `fa09d378` (somente docs/licença sobre a tag; `src/` idêntico à tag) |
++| Baileys | `7.0.0-rc.9` (`package-lock.json`, sem bump) |
++| Banco deste desenho | PostgreSQL e MySQL continuam no schema atual. Sem migration. |
++| Redis | Não é exigido. Limites ficam na memória do processo. |
++
++`git diff 2.3.7...fa09d378` não altera `src/`. O patch aplica em cima desse código de aplicação.
++
++## O que a 2.3.7 já fazia
++
++- `client.fetchMessageHistory(count, oldestMsgKey, oldestMsgTimestamp)` existe em Baileys `7.0.0-rc.9` (`lib/Socket/messages-recv.js`).
++- Envia `PeerDataOperationRequest` do tipo `HISTORY_SYNC_ON_DEMAND` com `oldestMsgTimestampMs`.
++- O retorno de `sendPeerDataOperationMessage` é o id da mensagem peer (`msgId`), não o histórico.
++- A resposta esperada é `messaging-history.set` com `syncType = 6` (`ON_DEMAND`) e `peerDataRequestSessionId`.
++- `messages.upsert.requestId` nesta versão é o caminho de placeholder resend. O código da 2.3.7 também o recebe. O patch isola esse evento só quando o `requestId` é o id da nossa solicitação.
++- Não havia rota HTTP. O único disparo era o texto de depuração `onDemandHistSync` dentro de `messages.upsert`.
++- `shouldSyncHistoryMessage` já deixa o download ocorrer (`historySyncNotification` retorna `true`). `syncFullHistory` não foi alterado.
++- O handler antigo de `messaging-history.set` gravava o lote e emitia `messages.set`, inclusive para `ON_DEMAND`.
++
++## Direção do protocolo
++
++A solicitação pede mensagens **mais antigas que a âncora**. Não pede mensagens mais novas. Um âncora anterior à janela perdida não preenche essa janela. Para alcançar mensagens perdidas durante a indisponibilidade, a âncora precisa ser uma mensagem real que o telefone ainda conhece e que seja **mais nova** do que o trecho buscado. Cada chamada é uma página. A página seguinte é outra chamada explícita, com a mensagem mais antiga já obtida como nova âncora. Não há varredura automática.
++
++WhatsApp pode responder vazio, parcial, ou não responder. Timeout não fabrica corpo. Status `received` ou `partial` significa apenas que este processo observou um lote correlacionado. Não significa que a janela da indisponibilidade foi recuperada.
++
++## Fluxo
++
++```
++POST /chat/recoverHistory/:instanceName
++  guards existentes (instância + apikey)
++  schema JSON + validação semântica
++  dry-run: não chama o socket
++  senão, se state !== open: unavailable, sem reconnect
++  senão: uma chamada fetchMessageHistory
++        count 1..50
++        key { remoteJid, fromMe, id }
++        oldestMsgTimestampMs = timestampSegundos * 1000
++
++evento Baileys
++  messaging-history.set syncType != ON_DEMAND
++    -> handler antigo (messages.set, Chatwoot de histórico inicial, etc.)
++  messaging-history.set syncType ON_DEMAND
++    -> isolado: sem messages.set, sem chatbot, sem recibo, sem unread
++    -> persiste só a conversa da solicitação, com proveniência
++  messages.upsert sem requestId, ou requestId desconhecido
++    -> handler vivo antigo (webhook, chatbot, Chatwoot)
++  messages.upsert requestId == sessão desta recuperação
++    -> mesmo isolamento da recuperação, mesmo se chegar atrasado
++```
++
++## Arquivos
++
++| Caminho | Papel |
++| --- | --- |
++| `src/api/services/history-recovery/history-recovery.constants.ts` | Limites, proveniência, baseline |
++| `src/api/services/history-recovery/history-recovery.types.ts` | Contratos |
++| `src/api/services/history-recovery/history-recovery.policy.ts` | Validação, seleção, proveniência, filtro `HISTORY` |
++| `src/api/services/history-recovery/history-recovery.coordinator.ts` | Estado em memória, correlação, auditoria sem corpo |
++| `src/api/services/history-recovery/history-recovery.runtime.ts` | Socket, timeout, dedupe, insert |
++| `src/api/dto/history-recovery.dto.ts` | DTO |
++| `src/validate/history-recovery.schema.ts` | JSONSchema7 |
++| `src/api/routes/chat.router.ts` | `POST recoverHistory`, `GET recoverHistoryStatus` |
++| `src/api/controllers/chat.controller.ts` | Delegação só se o canal tiver o método |
++| `src/api/integrations/channel/whatsapp/whatsapp.baileys.service.ts` | Uma chamada de protocolo e o desvio de eventos |
++| `src/api/integrations/chatbot/chatwoot/services/chatwoot.service.ts` | `syncLostMessages` ignora `status = HISTORY` |
++| `src/cli/recover-history.ts` | CLI HTTP. Não abre WhatsApp |
++| `test/history-recovery/history-recovery.test.ts` | Testes sintéticos |
++| `docs/history-recovery/HANDOFF.md` | Handoff |
++| `docs/history-recovery/DEPLOY.md` | Backup, build, rollback |
++| `docs/history-recovery/USAGE.md` | Contrato HTTP/CLI |
++| `docs/history-recovery/BOT_NOTICE.md` | Limites do que este patch não prova |
++| `docs/history-recovery/history-recovery.patch` | Diff sanitizado do código |
++
++## Persistência
++
++Sem coluna nova. Linha em `Message`:
++
++- `key.id`, `key.remoteJid`, `key.fromMe` e `messageTimestamp` vêm da mensagem de protocolo.
++- `status` gravado como `HISTORY` para não entrar na contagem de não lidas (`DELIVERY_ACK`).
++- `message._evolutionRecovery.provenance = "on-demand-history"`.
++- Insert idempotente: id já existente na mesma conversa não é atualizado.
++- Corpo ausente não é substituído por placeholder.
++- `SAVE_DATA.NEW_MESSAGE` ou `SAVE_DATA.HISTORIC` precisa estar ligado. Se ambos estiverem desligados, nada é gravado.
++
++## Isolamento que este processo faz
++
++Recuperação não chama `sendDataWebhook`, `chatbotController.emit`, `readMessages`, contador de não lidas, nem `chatwootService.eventWhatsapp`. Mensagem viva concorrente, sem o `requestId` da recuperação, continua no handler antigo. `syncFullHistory` não é ligado. Não há logout, reset, limpeza de sessão, wipe de banco ou replay automático.
++
++## BLOCKER externo
++
++O watcher que faz polling da tabela `Message` **não está neste repositório**. Inserir histórico nessa tabela cria linhas novas com timestamp original. Enquanto o watcher não excluir a proveniência, o fim a fim **não** está seguro.
++
++Filtro obrigatório no watcher:
++
++```sql
++COALESCE(message->'_evolutionRecovery'->>'provenance', '') <> 'on-demand-history'
++AND COALESCE(status, '') <> 'HISTORY'
++```
++
++A API devolve `integration.externalDbPoller.status = "BLOCKED"` em toda resposta. Isso não é um sucesso de restauração.
+diff --git a/docs/history-recovery/USAGE.md b/docs/history-recovery/USAGE.md
+new file mode 100644
+index 00000000..e8666ca4
+--- /dev/null
++++ b/docs/history-recovery/USAGE.md
+@@ -0,0 +1,83 @@
++# Uso — recuperação de histórico
++
++Autenticação igual às rotas de chat: header `apikey` e instância existente. O canal precisa ser Baileys e o socket precisa estar `open`. A chamada não reconecta, não faz logout e não altera `syncFullHistory`.
++
++Identificadores abaixo são sintéticos.
++
++## Dry-run
++
++```bash
++export EVOLUTION_API_KEY='...'
++export EVOLUTION_API_URL='http://127.0.0.1:8080'
++export EVOLUTION_INSTANCE='synthetic-instance'
++
++node node_modules/tsx/dist/cli.mjs src/cli/recover-history.ts \
++  --remote-jid 'synthetic-user-a@s.whatsapp.net' \
++  --anchor-id 'SYNTHETICANCHOR0001' \
++  --anchor-from-me false \
++  --anchor-timestamp 1700000000 \
++  --count 20 \
++  --not-before 1690000000 \
++  --dry-run
++```
++
++A chave sai só de `EVOLUTION_API_KEY`. A CLI não abre socket WhatsApp. A resposta não inclui corpo de mensagem. `wouldSend.oldestMsgTimestampMs` é o timestamp da âncora em milissegundos, unidade que o campo `oldestMsgTimestampMs` do Baileys 7.0.0-rc.9 exige. A âncora informada continua em segundos Unix, como `Message.messageTimestamp`.
++
++## Solicitação real
++
++Mesma CLI sem `--dry-run`, com `--poll`. Uma chamada, uma conversa, no máximo 50 mensagens, timeout entre 5s e 120s (padrão 45s).
++
++```http
++POST /chat/recoverHistory/:instanceName
++apikey: <chave>
++Content-Type: application/json
++
++{
++  "remoteJid": "synthetic-user-a@s.whatsapp.net",
++  "anchor": {
++    "id": "SYNTHETICANCHOR0001",
++    "fromMe": false,
++    "timestamp": 1700000000
++  },
++  "count": 20,
++  "page": 1,
++  "notBeforeTimestamp": 1690000000,
++  "notAfterTimestamp": 1700000000,
++  "dryRun": false,
++  "timeoutMs": 45000
++}
++```
++
++`page` é só rótulo. Não multiplica a busca. A página seguinte exige outra chamada, com uma âncora mais antiga escolhida pelo operador.
++
++```http
++GET /chat/recoverHistoryStatus/:instanceName?requestId=hr_...
++```
++
++## Status
++
++| status | Significado |
++| --- | --- |
++| `dry-run` | Validado. Socket não foi chamado. |
++| `accepted` | PDO enviado. Ainda não há lote. |
++| `empty` | Lote correlacionado sem mensagem aproveitável. |
++| `partial` | Chegaram menos mensagens do que `count`, ou parte foi filtrada. |
++| `received` | O lote observado atingiu `count`. Não garante a janela inteira. |
++| `timeout` | Nada correlacionado até o prazo. |
++| `late-received` | O lote chegou depois do timeout e foi isolado mesmo assim. |
++| `unavailable` | Socket fechado, método ausente, ou o Baileys recusou. Sem reconexão automática. |
++| `rejected` | Entrada inválida. |
++| `conflict` | Já existe uma recuperação em andamento nesta instância. |
++| `rate-limited` | Intervalo mínimo de 15s ou 30 solicitações por hora, neste processo. |
++
++HTTP: 200 dry-run e consulta, 202 accepted, 400 rejected, 409 conflict, 429 rate limit, 503 unavailable, 404 status desconhecido.
++
++## O que a resposta nunca afirma
++
++`verification.liveWhatsAppExecution` é sempre `false` neste build. `counts.persisted` é o que este processo gravou a partir de eventos que ele viu. Não é prova de que o telefone devolveu o período da queda.
++
++`integration.externalDbPoller.status` é sempre `BLOCKED`.
++
++## Consulta posterior
++
++`POST /chat/findMessages/:instanceName` devolve as linhas, inclusive as recuperadas. O corpo está em `message`. A marca está em `message._evolutionRecovery` e em `status: "HISTORY"`. Quem trata essa consulta como fila de mensagens novas precisa aplicar o mesmo filtro do watcher.
+diff --git a/package.json b/package.json
+index 56e32fcc..47d1e2a1 100644
+--- a/package.json
++++ b/package.json
+@@ -10,6 +10,7 @@
+     "start:prod": "node dist/main",
+     "dev:server": "tsx watch ./src/main.ts",
+     "test": "tsx watch ./test/all.test.ts",
++    "test:history-recovery": "tsx --test test/history-recovery/*.test.ts",
+     "lint": "eslint --fix --ext .ts src",
+     "lint:check": "eslint --ext .ts src",
+     "commit": "cz",
+diff --git a/src/api/controllers/chat.controller.ts b/src/api/controllers/chat.controller.ts
+index 22e90b9f..0885b9ba 100644
+--- a/src/api/controllers/chat.controller.ts
++++ b/src/api/controllers/chat.controller.ts
+@@ -14,6 +14,7 @@ import {
+   UpdateMessageDto,
+   WhatsAppNumberDto,
+ } from '@api/dto/chat.dto';
++import { HistoryRecoveryDto } from '@api/dto/history-recovery.dto';
+ import { InstanceDto } from '@api/dto/instance.dto';
+ import { Query } from '@api/repository/repository.service';
+ import { WAMonitoringService } from '@api/services/monitor.service';
+@@ -113,4 +114,34 @@ export class ChatController {
+   public async blockUser({ instanceName }: InstanceDto, data: BlockUserDto) {
+     return await this.waMonitor.waInstances[instanceName].blockUser(data);
+   }
++
++  public async recoverHistory({ instanceName }: InstanceDto, data: HistoryRecoveryDto): Promise<any> {
++    const waInstance = this.waMonitor.waInstances[instanceName] as {
++      recoverMessageHistory?: (body: HistoryRecoveryDto) => Promise<any>;
++    };
++    if (!waInstance?.recoverMessageHistory) {
++      return {
++        httpStatus: 503,
++        status: 'unavailable',
++        error: 'Recuperação de histórico está disponível apenas no canal Baileys desta baseline.',
++        verification: { liveWhatsAppExecution: false },
++        integration: { externalDbPoller: { status: 'BLOCKED' } },
++      };
++    }
++    return waInstance.recoverMessageHistory(data);
++  }
++
++  public async recoverHistoryStatus({ instanceName }: InstanceDto, requestId: string): Promise<any> {
++    const waInstance = this.waMonitor.waInstances[instanceName] as {
++      recoverMessageHistoryStatus?: (id: string) => any;
++    };
++    if (!waInstance?.recoverMessageHistoryStatus) {
++      return {
++        httpStatus: 503,
++        status: 'unavailable',
++        error: 'Recuperação de histórico está disponível apenas no canal Baileys desta baseline.',
++      };
++    }
++    return waInstance.recoverMessageHistoryStatus(requestId);
++  }
+ }
+diff --git a/src/api/dto/history-recovery.dto.ts b/src/api/dto/history-recovery.dto.ts
+new file mode 100644
+index 00000000..7286a786
+--- /dev/null
++++ b/src/api/dto/history-recovery.dto.ts
+@@ -0,0 +1,17 @@
++export class HistoryRecoveryAnchorDto {
++  id: string;
++  remoteJid?: string;
++  fromMe: boolean;
++  timestamp: number;
++}
++
++export class HistoryRecoveryDto {
++  remoteJid: string;
++  anchor: HistoryRecoveryAnchorDto;
++  count: number;
++  page?: number;
++  notBeforeTimestamp?: number;
++  notAfterTimestamp?: number;
++  dryRun?: boolean;
++  timeoutMs?: number;
++}
+diff --git a/src/api/integrations/channel/whatsapp/whatsapp.baileys.service.ts b/src/api/integrations/channel/whatsapp/whatsapp.baileys.service.ts
+index 60e857fc..e46ba846 100644
+--- a/src/api/integrations/channel/whatsapp/whatsapp.baileys.service.ts
++++ b/src/api/integrations/channel/whatsapp/whatsapp.baileys.service.ts
+@@ -29,6 +29,7 @@ import {
+   GroupUpdateParticipantDto,
+   GroupUpdateSettingDto,
+ } from '@api/dto/group.dto';
++import { HistoryRecoveryDto } from '@api/dto/history-recovery.dto';
+ import { InstanceDto, SetPresenceDto } from '@api/dto/instance.dto';
+ import { HandleLabelDto, LabelDto } from '@api/dto/label.dto';
+ import {
+@@ -59,6 +60,8 @@ import { PrismaRepository, Query } from '@api/repository/repository.service';
+ import { chatbotController, waMonitor } from '@api/server.module';
+ import { CacheService } from '@api/services/cache.service';
+ import { ChannelStartupService } from '@api/services/channel.service';
++import { withoutRecoveredHistory } from '@api/services/history-recovery/history-recovery.policy';
++import { HistoryRecoveryRuntime } from '@api/services/history-recovery/history-recovery.runtime';
+ import { Events, MessageSubtype, TypeMediaMessage, wa } from '@api/types/wa.types';
+ import { CacheEngine } from '@cache/cacheengine';
+ import {
+@@ -251,6 +254,44 @@ export class BaileysStartupService extends ChannelStartupService {
+   private endSession = false;
+   private logBaileys = this.configService.get<Log>('LOG').BAILEYS;
+   private eventProcessingQueue: Promise<void> = Promise.resolve();
++  private readonly historyRecovery = new HistoryRecoveryRuntime({
++    connectionState: () => this.stateConnection?.state,
++    fetchMessageHistory: async (count, key, oldestMsgTimestampMs) => {
++      if (!this.client || typeof this.client.fetchMessageHistory !== 'function') {
++        throw new Error('fetchMessageHistory is not available on this Baileys socket');
++      }
++      return this.client.fetchMessageHistory(count, key, oldestMsgTimestampMs);
++    },
++    normalize: (message) => {
++      if (!message?.message || !message.key?.id) {
++        return null;
++      }
++      try {
++        const prepared = this.prepareMessage(message as any);
++        if (!prepared?.message || !prepared?.key?.id) {
++          return null;
++        }
++        return prepared;
++      } catch {
++        return null;
++      }
++    },
++    findExistingIds: (ids, remoteJid) => this.findRecoveredMessageIds(ids, remoteJid),
++    insertRows: async (rows) => {
++      if (rows.length === 0) {
++        return;
++      }
++      await this.prismaRepository.message.createMany({ data: rows as any });
++    },
++    persistenceEnabled: () => {
++      const save = this.configService.get<Database>('DATABASE').SAVE_DATA;
++      return !!(save?.NEW_MESSAGE || save?.HISTORIC);
++    },
++    logger: {
++      info: (value) => this.logger.info(value),
++      error: (value) => this.logger.error(value),
++    },
++  });
+ 
+   // Cache TTL constants (in seconds)
+   private readonly MESSAGE_CACHE_TTL_SECONDS = 5 * 60; // 5 minutes - avoid duplicate message processing
+@@ -1907,17 +1948,24 @@ export class BaileysStartupService extends ChannelStartupService {
+               this.instance.authState.saveCreds();
+             }
+ 
+-            if (events['messaging-history.set']) {
+-              const payload = events['messaging-history.set'];
+-              await this.messageHandle['messaging-history.set'](payload);
+-            }
+-
+-            if (events['messages.upsert']) {
+-              const payload = events['messages.upsert'];
+-
+-              // this.messageProcessor.processMessage(payload, settings);
+-              await this.messageHandle['messages.upsert'](payload, settings);
+-            }
++            await this.historyRecovery.planAndApply(
++              {
++                historySet: events['messaging-history.set'],
++                upsert: events['messages.upsert'],
++              },
++              {
++                passthroughHistory: (payload) => this.messageHandle['messaging-history.set'](payload),
++                liveUpsert: (payload) =>
++                  this.messageHandle['messages.upsert'](
++                    {
++                      messages: payload.messages as any,
++                      type: payload.type as any,
++                      requestId: payload.requestId as string | undefined,
++                    },
++                    settings,
++                  ),
++              },
++            );
+ 
+             if (events['messages.update']) {
+               const payload = events['messages.update'];
+@@ -3689,14 +3737,21 @@ export class BaileysStartupService extends ChannelStartupService {
+   }
+ 
+   public async getLastMessage(number: string) {
+-    const where: any = { key: { remoteJid: number }, instanceId: this.instance.id };
+-
+-    const messages = await this.prismaRepository.message.findMany({
+-      where,
++    const baseWhere: any = { key: { remoteJid: number }, instanceId: this.instance.id };
++    let messages = await this.prismaRepository.message.findMany({
++      where: withoutRecoveredHistory(baseWhere),
+       orderBy: { messageTimestamp: 'desc' },
+       take: 1,
+     });
+ 
++    if (messages.length === 0) {
++      messages = await this.prismaRepository.message.findMany({
++        where: baseWhere,
++        orderBy: { messageTimestamp: 'desc' },
++        take: 1,
++      });
++    }
++
+     if (messages.length === 0) {
+       throw new NotFoundException('Messages not found');
+     }
+@@ -5013,6 +5068,35 @@ export class BaileysStartupService extends ChannelStartupService {
+     }
+   }
+ 
++  public async recoverMessageHistory(data: HistoryRecoveryDto) {
++    return this.historyRecovery.request(data);
++  }
++
++  public async recoverMessageHistoryStatus(requestId: string) {
++    return this.historyRecovery.status(requestId);
++  }
++
++  private async findRecoveredMessageIds(ids: string[], remoteJid: string): Promise<Set<string>> {
++    if (ids.length === 0) {
++      return new Set();
++    }
++    const existing = await this.prismaRepository.message.findMany({
++      where: {
++        instanceId: this.instanceId,
++        OR: ids.map((id) => ({ key: { path: ['id'], equals: id } })),
++      },
++      select: { key: true },
++    });
++    const found = new Set<string>();
++    for (const row of existing) {
++      const key = row.key as { id?: string; remoteJid?: string };
++      if (key?.id && key.remoteJid === remoteJid) {
++        found.add(key.id);
++      }
++    }
++    return found;
++  }
++
+   public async fetchMessages(query: Query<Message>) {
+     const keyFilters = query?.where?.key as ExtendedIMessageKey;
+ 
+diff --git a/src/api/integrations/chatbot/chatwoot/services/chatwoot.service.ts b/src/api/integrations/chatbot/chatwoot/services/chatwoot.service.ts
+index 906fff18..34c4f8b8 100644
+--- a/src/api/integrations/chatbot/chatwoot/services/chatwoot.service.ts
++++ b/src/api/integrations/chatbot/chatwoot/services/chatwoot.service.ts
+@@ -5,6 +5,7 @@ import { postgresClient } from '@api/integrations/chatbot/chatwoot/libs/postgres
+ import { chatwootImport } from '@api/integrations/chatbot/chatwoot/utils/chatwoot-import-helper';
+ import { PrismaRepository } from '@api/repository/repository.service';
+ import { CacheService } from '@api/services/cache.service';
++import { withoutRecoveredHistory } from '@api/services/history-recovery/history-recovery.policy';
+ import { WAMonitoringService } from '@api/services/monitor.service';
+ import { Events } from '@api/types/wa.types';
+ import { Chatwoot, ConfigService, Database, HttpServer } from '@config/env.config';
+@@ -2676,11 +2677,11 @@ export class ChatwootService {
+         .map((message) => message.source_id.replace('WAID:', ''));
+ 
+       const savedMessages = await this.prismaRepository.message.findMany({
+-        where: {
++        where: withoutRecoveredHistory({
+           Instance: { name: instance.instanceName },
+           messageTimestamp: { gte: Number(dayjs().subtract(6, 'hours').unix()) },
+           AND: ids.map((id) => ({ key: { path: ['id'], not: id } })),
+-        },
++        }),
+       });
+ 
+       const filteredMessages = savedMessages.filter(
+diff --git a/src/api/routes/chat.router.ts b/src/api/routes/chat.router.ts
+index 158947ed..b859bde0 100644
+--- a/src/api/routes/chat.router.ts
++++ b/src/api/routes/chat.router.ts
+@@ -15,10 +15,12 @@ import {
+   UpdateMessageDto,
+   WhatsAppNumberDto,
+ } from '@api/dto/chat.dto';
++import { HistoryRecoveryDto } from '@api/dto/history-recovery.dto';
+ import { InstanceDto } from '@api/dto/instance.dto';
+ import { Query } from '@api/repository/repository.service';
+ import { chatController } from '@api/server.module';
+ import { Contact, Message, MessageUpdate } from '@prisma/client';
++import { historyRecoverySchema } from '@validate/history-recovery.schema';
+ import {
+   archiveChatSchema,
+   blockUserSchema,
+@@ -272,6 +274,21 @@ export class ChatRouter extends RouterBroker {
+ 
+         return res.status(HttpStatus.OK).json(response);
+       })
++      .post(this.routerPath('recoverHistory'), ...guards, async (req, res) => {
++        const response = await this.dataValidate<HistoryRecoveryDto>({
++          request: req,
++          schema: historyRecoverySchema,
++          ClassRef: HistoryRecoveryDto,
++          execute: (instance, data) => chatController.recoverHistory(instance, data),
++        });
++        return res.status(response?.httpStatus ?? HttpStatus.OK).json(stripHttpStatus(response));
++      })
++      .get(this.routerPath('recoverHistoryStatus'), ...guards, async (req, res) => {
++        const instance = req.params as unknown as InstanceDto;
++        const requestId = typeof req.query.requestId === 'string' ? req.query.requestId : '';
++        const response = await chatController.recoverHistoryStatus(instance, requestId);
++        return res.status(response?.httpStatus ?? HttpStatus.OK).json(stripHttpStatus(response));
++      })
+       .post(this.routerPath('updatePrivacySettings'), ...guards, async (req, res) => {
+         const response = await this.dataValidate<PrivacySettingDto>({
+           request: req,
+@@ -286,3 +303,12 @@ export class ChatRouter extends RouterBroker {
+ 
+   public readonly router: Router = Router();
+ }
++
++function stripHttpStatus<T>(response: T): T {
++  if (!response || typeof response !== 'object' || !('httpStatus' in response)) {
++    return response;
++  }
++  const clone = { ...(response as Record<string, unknown>) };
++  delete clone.httpStatus;
++  return clone as T;
++}
+diff --git a/src/api/services/history-recovery/history-recovery.constants.ts b/src/api/services/history-recovery/history-recovery.constants.ts
+new file mode 100644
+index 00000000..70057157
+--- /dev/null
++++ b/src/api/services/history-recovery/history-recovery.constants.ts
+@@ -0,0 +1,41 @@
++/**
++ * Bounds for opt-in, per-conversation on-demand history recovery.
++ * Baileys 7.0.0-rc.9 fetchMessageHistory sends HistorySyncOnDemandRequest.
++ * The companion asks the primary phone for messages OLDER than the anchor.
++ */
++export const HISTORY_RECOVERY_LIMITS = {
++  minCount: 1,
++  maxCount: 50,
++  minPage: 1,
++  maxPage: 20,
++  minTimeoutMs: 5_000,
++  maxTimeoutMs: 120_000,
++  defaultTimeoutMs: 45_000,
++  minIntervalMs: 15_000,
++  maxPerHour: 30,
++  correlationTtlMs: 24 * 60 * 60 * 1000,
++  maxTrackedRequests: 50,
++  maxAuditEntries: 100,
++} as const;
++
++/** proto.HistorySync.HistorySyncType.ON_DEMAND in Baileys 7.0.0-rc.9. */
++export const ON_DEMAND_SYNC_TYPE = 6;
++
++export const HISTORY_RECOVERY_PROVENANCE = 'on-demand-history';
++
++/**
++ * Stored Message.status for recovered rows.
++ * DELIVERY_ACK is what this codebase counts as unread, so recovered rows must not use it.
++ */
++export const HISTORY_RECOVERY_STORED_STATUS = 'HISTORY';
++
++export const ANCHOR_MIN_UNIX_SECONDS = 1_000_000_000;
++export const ANCHOR_MAX_UNIX_SECONDS = 4_000_000_000;
++export const MILLISECOND_TIMESTAMP_FLOOR = 1_000_000_000_000;
++
++export const BASELINE = {
++  evolution: '2.3.7',
++  evolutionCommit: 'cd800f2976e1e5b682fbf86a01ee4d85ae61f370',
++  baileys: '7.0.0-rc.9',
++  direction: 'older-than-anchor',
++} as const;
+diff --git a/src/api/services/history-recovery/history-recovery.coordinator.ts b/src/api/services/history-recovery/history-recovery.coordinator.ts
+new file mode 100644
+index 00000000..6f178adc
+--- /dev/null
++++ b/src/api/services/history-recovery/history-recovery.coordinator.ts
+@@ -0,0 +1,525 @@
++import { randomUUID } from 'crypto';
++
++import { BASELINE, HISTORY_RECOVERY_LIMITS } from './history-recovery.constants';
++import {
++  addCounts,
++  buildProvenance,
++  emptyCounts,
++  isOnDemandSyncType,
++  selectRecoverableMessages,
++  validateRecoveryRequest,
++} from './history-recovery.policy';
++import {
++  AuditEntry,
++  HistorySetEvent,
++  NormalizedRecoveryRequest,
++  PublicRecoveryView,
++  RecoveryBatch,
++  RecoveryRecord,
++  RecoveryRequestInput,
++  RecoveryStatus,
++  RoutingPlan,
++} from './history-recovery.types';
++
++const WATCHER_SQL =
++  "COALESCE(message->'_evolutionRecovery'->>'provenance', '') <> 'on-demand-history' AND COALESCE(status, '') <> 'HISTORY'";
++
++const VERIFICATION_STATEMENT =
++  'Counts reflect events observed by this process only. They are not evidence that a missed outage window was recovered on a real WhatsApp device.';
++
++function inFlight(status: RecoveryRecord['status']): boolean {
++  return status === 'reserved' || status === 'accepted';
++}
++
++export class HistoryRecoveryCoordinator {
++  private readonly records = new Map<string, RecoveryRecord>();
++  private readonly bySession = new Map<string, string>();
++  private readonly submittedAt: number[] = [];
++  private lastSubmittedAt = 0;
++  private readonly auditLog: AuditEntry[] = [];
++
++  constructor(private readonly requestIdFactory: () => string = () => `hr_${randomUUID()}`) {}
++
++  public prepare(
++    input: RecoveryRequestInput,
++    now: number,
++  ): { ok: true; record: RecoveryRecord } | { ok: false; view: PublicRecoveryView } {
++    const validated = validateRecoveryRequest(input);
++    if (validated.ok === false) {
++      return { ok: false, view: this.rejectedView(validated.errors) };
++    }
++
++    const value = validated.value;
++    if (value.dryRun) {
++      const record = this.makeRecord(value, now, 'dry-run', 200);
++      this.remember(record);
++      this.audit(record, 'dry-run', now);
++      return { ok: true, record };
++    }
++
++    const active = this.activeRecord();
++    if (active) {
++      return {
++        ok: false,
++        view: this.conflictView(active.requestId),
++      };
++    }
++
++    this.pruneSubmitted(now);
++    if (this.lastSubmittedAt > 0 && now - this.lastSubmittedAt < HISTORY_RECOVERY_LIMITS.minIntervalMs) {
++      return { ok: false, view: this.rateLimitedView('Aguarde o intervalo mínimo antes de outra recuperação.') };
++    }
++    if (this.submittedAt.length >= HISTORY_RECOVERY_LIMITS.maxPerHour) {
++      return { ok: false, view: this.rateLimitedView('Limite horário de recuperações desta instância foi atingido.') };
++    }
++
++    const record = this.makeRecord(value, now, 'reserved', 202);
++    this.remember(record);
++    this.audit(record, 'reserve', now);
++    return { ok: true, record };
++  }
++
++  public markSubmitted(requestId: string, sessionId: string, now: number): void {
++    const record = this.records.get(requestId);
++    if (!record || record.status !== 'reserved') {
++      return;
++    }
++    record.status = 'accepted';
++    record.httpStatus = 202;
++    record.peerDataRequestSessionId = sessionId;
++    record.submittedAt = now;
++    record.deadlineAt = now + record.timeoutMs;
++    this.bySession.set(sessionId, requestId);
++    this.lastSubmittedAt = now;
++    this.submittedAt.push(now);
++    this.audit(record, 'submit', now);
++  }
++
++  public abort(requestId: string, status: RecoveryStatus, httpStatus: number, error: string, now: number): void {
++    const record = this.records.get(requestId);
++    if (!record) {
++      return;
++    }
++    record.status = status;
++    record.httpStatus = httpStatus;
++    record.lastError = error;
++    this.audit(record, status, now);
++  }
++
++  public expire(now: number): void {
++    for (const record of this.records.values()) {
++      if (record.status === 'accepted' && record.deadlineAt !== undefined && now >= record.deadlineAt) {
++        record.status = 'timeout';
++        record.httpStatus = 200;
++        this.audit(record, 'timeout', now);
++      }
++    }
++  }
++
++  public planEvents(events: { historySet?: any; upsert?: any }, now: number): RoutingPlan {
++    this.expire(now);
++    const plan: RoutingPlan = {
++      passthroughHistorySet: false,
++      recoveryBatches: [],
++      liveUpsert: null,
++    };
++
++    if (events.historySet) {
++      if (!isOnDemandSyncType(events.historySet.syncType)) {
++        plan.passthroughHistorySet = true;
++        plan.historyPayload = events.historySet;
++      } else {
++        const batch = this.consumeHistory(events.historySet, now);
++        if (batch) {
++          plan.recoveryBatches.push(batch);
++        }
++      }
++    }
++
++    if (events.upsert) {
++      const sessionId =
++        events.upsert.requestId === undefined || events.upsert.requestId === null
++          ? ''
++          : String(events.upsert.requestId);
++      const requestId = sessionId ? this.bySession.get(sessionId) : undefined;
++      if (requestId && this.records.has(requestId)) {
++        const batch = this.consumeMessages(requestId, events.upsert.messages, now, 'messages.upsert');
++        if (batch) {
++          plan.recoveryBatches.push(batch);
++        }
++      } else {
++        plan.liveUpsert = {
++          messages: events.upsert.messages ?? [],
++          type: events.upsert.type,
++          requestId: events.upsert.requestId,
++        };
++      }
++    }
++
++    return plan;
++  }
++
++  public notePersistence(
++    requestId: string,
++    tally: {
++      persisted: number;
++      duplicates: number;
++      skippedWithoutBody: number;
++      persistenceDisabled: boolean;
++      error?: string;
++    },
++    now: number,
++  ): void {
++    const record = this.records.get(requestId);
++    if (!record) {
++      return;
++    }
++    record.counts.persisted += tally.persisted;
++    record.counts.duplicates += tally.duplicates;
++    record.counts.skippedWithoutBody += tally.skippedWithoutBody;
++    record.persistenceDisabled = tally.persistenceDisabled;
++    if (tally.error) {
++      record.lastError = tally.error;
++    }
++    this.audit(record, 'persist', now);
++  }
++
++  public get(requestId: string, now: number): RecoveryRecord | undefined {
++    this.expire(now);
++    return this.records.get(requestId);
++  }
++
++  public auditEntries(): AuditEntry[] {
++    return this.auditLog.map((entry) => ({ ...entry, counts: { ...entry.counts } }));
++  }
++
++  public toPublic(record: RecoveryRecord): PublicRecoveryView {
++    const status = record.status === 'reserved' ? 'accepted' : record.status;
++    const view: PublicRecoveryView = {
++      requestId: record.requestId,
++      status,
++      httpStatus: record.httpStatus,
++      dryRun: record.dryRun,
++      direction: 'older-than-anchor',
++      baseline: {
++        evolution: BASELINE.evolution,
++        evolutionCommit: BASELINE.evolutionCommit,
++        baileys: BASELINE.baileys,
++      },
++      remoteJid: record.remoteJid,
++      anchor: {
++        id: record.anchor.id,
++        fromMe: record.anchor.fromMe,
++        timestampSeconds: record.anchor.timestampSeconds,
++      },
++      limits: {
++        count: record.count,
++        page: record.page,
++        timeoutMs: record.timeoutMs,
++        maxCount: HISTORY_RECOVERY_LIMITS.maxCount,
++        maxPage: HISTORY_RECOVERY_LIMITS.maxPage,
++        minTimeoutMs: HISTORY_RECOVERY_LIMITS.minTimeoutMs,
++        maxTimeoutMs: HISTORY_RECOVERY_LIMITS.maxTimeoutMs,
++      },
++      counts: { ...record.counts },
++      persistence: this.persistenceView(record.persistenceDisabled),
++      delivery: this.deliveryView(),
++      integration: this.integrationView(),
++      verification: {
++        liveWhatsAppExecution: false,
++        statement: VERIFICATION_STATEMENT,
++      },
++      protocol: this.protocolView(),
++    };
++    if (record.dryRun) {
++      view.wouldSend = {
++        method: 'fetchMessageHistory',
++        count: record.count,
++        oldestMsgTimestampMs: record.anchor.timestampSeconds * 1000,
++        oldestMsgFromMe: record.anchor.fromMe,
++        oldestMsgId: record.anchor.id,
++        chatJid: record.remoteJid,
++      };
++    }
++    if (record.lastError) {
++      view.error = record.lastError;
++    }
++    return view;
++  }
++
++  private consumeHistory(event: HistorySetEvent, now: number): RecoveryBatch | null {
++    const sessionId =
++      event.peerDataRequestSessionId === undefined || event.peerDataRequestSessionId === null
++        ? ''
++        : String(event.peerDataRequestSessionId);
++    let requestId = sessionId ? this.bySession.get(sessionId) : undefined;
++    if (!requestId) {
++      const candidate = this.singleAttributableRecord(now);
++      requestId = candidate?.requestId;
++      if (requestId && sessionId) {
++        this.bySession.set(sessionId, requestId);
++        const record = this.records.get(requestId);
++        if (record && !record.peerDataRequestSessionId) {
++          record.peerDataRequestSessionId = sessionId;
++        }
++      }
++    }
++    if (!requestId || !this.records.has(requestId)) {
++      this.auditLog.push({
++        at: now,
++        requestId: null,
++        event: 'unsolicited-on-demand',
++        status: 'ignored',
++        counts: { ...emptyCounts(), protocolMessages: event.messages?.length ?? 0 },
++      });
++      this.trimAudit();
++      return null;
++    }
++    return this.consumeMessages(requestId, event.messages, now, 'messaging-history.set');
++  }
++
++  private consumeMessages(
++    requestId: string,
++    messages: HistorySetEvent['messages'],
++    now: number,
++    eventName: string,
++  ): RecoveryBatch | null {
++    const record = this.records.get(requestId);
++    if (!record || !this.correlatable(record, now)) {
++      return null;
++    }
++    const selection = selectRecoverableMessages(messages, record);
++    addCounts(record.counts, selection.counts);
++    const wasTimeout = record.status === 'timeout';
++    if (record.counts.acceptedForStorage === 0) {
++      record.status = wasTimeout ? 'timeout' : 'empty';
++    } else if (wasTimeout) {
++      record.status = 'late-received';
++    } else if (record.counts.acceptedForStorage >= record.count) {
++      record.status = 'received';
++    } else {
++      record.status = 'partial';
++    }
++    record.httpStatus = 200;
++    this.audit(record, eventName, now);
++    return {
++      requestId,
++      provenance: buildProvenance(record, now),
++      messages: selection.selected,
++    };
++  }
++
++  private correlatable(record: RecoveryRecord, now: number): boolean {
++    if (record.dryRun || record.status === 'reserved' || record.status === 'rejected') {
++      return false;
++    }
++    const started = record.submittedAt ?? record.createdAt;
++    return now - started <= HISTORY_RECOVERY_LIMITS.correlationTtlMs;
++  }
++
++  private singleAttributableRecord(now: number): RecoveryRecord | undefined {
++    const candidates = [...this.records.values()].filter((record) => {
++      if (!this.correlatable(record, now)) {
++        return false;
++      }
++      return record.status === 'accepted' || record.status === 'timeout' || record.status === 'partial';
++    });
++    const accepted = candidates.filter((record) => record.status === 'accepted');
++    if (accepted.length === 1) {
++      return accepted[0];
++    }
++    if (accepted.length === 0 && candidates.length === 1) {
++      return candidates[0];
++    }
++    return undefined;
++  }
++
++  private activeRecord(): RecoveryRecord | undefined {
++    return [...this.records.values()].find((record) => inFlight(record.status));
++  }
++
++  private makeRecord(
++    value: NormalizedRecoveryRequest,
++    now: number,
++    status: RecoveryRecord['status'],
++    httpStatus: number,
++  ): RecoveryRecord {
++    return {
++      requestId: this.requestIdFactory(),
++      peerDataRequestSessionId: null,
++      remoteJid: value.remoteJid,
++      anchor: value.anchor,
++      count: value.count,
++      page: value.page,
++      notBeforeTimestamp: value.notBeforeTimestamp,
++      notAfterTimestamp: value.notAfterTimestamp,
++      timeoutMs: value.timeoutMs,
++      dryRun: value.dryRun,
++      status,
++      httpStatus,
++      createdAt: now,
++      counts: emptyCounts(),
++      persistenceDisabled: false,
++    };
++  }
++
++  private remember(record: RecoveryRecord): void {
++    this.records.set(record.requestId, record);
++    this.trimRecords();
++  }
++
++  private trimRecords(): void {
++    const terminal = [...this.records.values()].filter((record) => !inFlight(record.status));
++    while (this.records.size > HISTORY_RECOVERY_LIMITS.maxTrackedRequests && terminal.length > 0) {
++      const oldest = terminal.shift();
++      if (!oldest) {
++        break;
++      }
++      this.records.delete(oldest.requestId);
++      if (oldest.peerDataRequestSessionId) {
++        this.bySession.delete(oldest.peerDataRequestSessionId);
++      }
++    }
++  }
++
++  private pruneSubmitted(now: number): void {
++    const cutoff = now - 60 * 60 * 1000;
++    while (this.submittedAt.length > 0 && this.submittedAt[0] < cutoff) {
++      this.submittedAt.shift();
++    }
++  }
++
++  private audit(record: RecoveryRecord, event: string, now: number): void {
++    this.auditLog.push({
++      at: now,
++      requestId: record.requestId,
++      event,
++      status: record.status,
++      counts: { ...record.counts },
++    });
++    this.trimAudit();
++  }
++
++  private trimAudit(): void {
++    while (this.auditLog.length > HISTORY_RECOVERY_LIMITS.maxAuditEntries) {
++      this.auditLog.shift();
++    }
++  }
++
++  private persistenceView(persistenceDisabled: boolean): PublicRecoveryView['persistence'] {
++    return {
++      table: 'Message',
++      storedStatus: 'HISTORY',
++      provenancePath: 'message._evolutionRecovery.provenance',
++      provenanceValue: 'on-demand-history',
++      idempotent: true,
++      preserves: ['messageTimestamp', 'key.fromMe', 'key.id', 'key.remoteJid'],
++      persistenceDisabled,
++    };
++  }
++
++  private deliveryView(): PublicRecoveryView['delivery'] {
++    return {
++      messagesUpsertWebhook: false,
++      messagesSetWebhook: false,
++      chatbotEmit: false,
++      chatwootEvent: false,
++      readReceipts: false,
++      unreadCounter: false,
++      autosend: false,
++    };
++  }
++
++  private integrationView(): PublicRecoveryView['integration'] {
++    return {
++      externalDbPoller: {
++        status: 'BLOCKED',
++        requiredSqlExclusion: WATCHER_SQL,
++        reason:
++          'Recovered rows are inserted into Message with their original timestamps. A database poller that treats every new row as a live message will misclassify them until it excludes this provenance and HISTORY status. That watcher is not in this repository.',
++      },
++    };
++  }
++
++  private protocolView(): PublicRecoveryView['protocol'] {
++    return {
++      method: 'baileys.fetchMessageHistory',
++      responseEvents: ['messaging-history.set', 'messages.upsert'],
++      notes: [
++        'The Baileys 7.0.0-rc.9 request asks for messages older than the anchor. It does not fetch newer messages.',
++        'WhatsApp may return no data, a partial page, or nothing before the timeout. This API does not invent message bodies.',
++        'A completed or partial status only means a correlated protocol batch was observed. It does not mean the outage window is complete.',
++        'Page is a label for the caller. Each invocation performs one fetch. The next older page requires a new explicit call with a new anchor.',
++        'syncFullHistory is not changed. There is no automatic catch-up scan.',
++      ],
++    };
++  }
++
++  private rejectedView(errors: string[]): PublicRecoveryView {
++    return {
++      status: 'rejected',
++      httpStatus: 400,
++      dryRun: false,
++      direction: 'older-than-anchor',
++      baseline: { evolution: BASELINE.evolution, evolutionCommit: BASELINE.evolutionCommit, baileys: BASELINE.baileys },
++      limits: {
++        maxCount: HISTORY_RECOVERY_LIMITS.maxCount,
++        maxPage: HISTORY_RECOVERY_LIMITS.maxPage,
++        minTimeoutMs: HISTORY_RECOVERY_LIMITS.minTimeoutMs,
++        maxTimeoutMs: HISTORY_RECOVERY_LIMITS.maxTimeoutMs,
++      },
++      counts: emptyCounts(),
++      persistence: this.persistenceView(false),
++      delivery: this.deliveryView(),
++      integration: this.integrationView(),
++      verification: { liveWhatsAppExecution: false, statement: VERIFICATION_STATEMENT },
++      protocol: this.protocolView(),
++      errors,
++      error: errors[0],
++    };
++  }
++
++  private conflictView(activeRequestId: string): PublicRecoveryView {
++    const view = this.rejectedView(['Já existe uma recuperação em andamento para esta instância.']);
++    view.status = 'conflict';
++    view.httpStatus = 409;
++    view.activeRequestId = activeRequestId;
++    return view;
++  }
++
++  private rateLimitedView(message: string): PublicRecoveryView {
++    const view = this.rejectedView([message]);
++    view.status = 'rate-limited';
++    view.httpStatus = 429;
++    return view;
++  }
++}
++
++export function safeProtocolError(error: unknown): string {
++  const message = error instanceof Error ? error.message : 'Falha ao solicitar histórico sob demanda.';
++  return message.replace(/\s+/g, ' ').slice(0, 200);
++}
++
++export async function applyBaileysEventRouting(
++  plan: RoutingPlan,
++  handlers: {
++    passthroughHistory: (payload: any) => Promise<void>;
++    persistRecovery: (batch: RecoveryBatch) => Promise<void>;
++    liveUpsert: (payload: { messages: any[]; type?: unknown; requestId?: unknown }) => Promise<void>;
++    onRecoveryError?: (error: unknown) => void;
++  },
++): Promise<void> {
++  if (plan.liveUpsert) {
++    await handlers.liveUpsert(plan.liveUpsert);
++  }
++  if (plan.passthroughHistorySet && plan.historyPayload) {
++    await handlers.passthroughHistory(plan.historyPayload);
++  }
++  for (const batch of plan.recoveryBatches) {
++    try {
++      await handlers.persistRecovery(batch);
++    } catch (error) {
++      handlers.onRecoveryError?.(error);
++    }
++  }
++}
+diff --git a/src/api/services/history-recovery/history-recovery.policy.ts b/src/api/services/history-recovery/history-recovery.policy.ts
+new file mode 100644
+index 00000000..49e73d14
+--- /dev/null
++++ b/src/api/services/history-recovery/history-recovery.policy.ts
+@@ -0,0 +1,349 @@
++import {
++  ANCHOR_MAX_UNIX_SECONDS,
++  ANCHOR_MIN_UNIX_SECONDS,
++  HISTORY_RECOVERY_LIMITS,
++  HISTORY_RECOVERY_PROVENANCE,
++  HISTORY_RECOVERY_STORED_STATUS,
++  MILLISECOND_TIMESTAMP_FLOOR,
++  ON_DEMAND_SYNC_TYPE,
++} from './history-recovery.constants';
++import {
++  InboundRecoveryMessage,
++  NormalizedRecoveryRequest,
++  RecoveryAnchorInput,
++  RecoveryCounts,
++  RecoveryProvenance,
++  RecoveryRecord,
++  RecoveryRequestInput,
++  SelectedRecoveryMessage,
++  StoredRecoveryRow,
++} from './history-recovery.types';
++
++const JID_PATTERN =
++  /^(?:[0-9]{6,20}@s\.whatsapp\.net|[0-9]{6,30}(?:-[0-9]{6,30})?@g\.us|[0-9]{6,20}@lid|synthetic-[a-z0-9-]{1,40}@(?:s\.whatsapp\.net|g\.us|lid))$/;
++
++const MESSAGE_ID_PATTERN = /^[A-Za-z0-9]{6,128}$/;
++
++export function emptyCounts(): RecoveryCounts {
++  return {
++    protocolMessages: 0,
++    acceptedForStorage: 0,
++    persisted: 0,
++    duplicates: 0,
++    skippedWithoutBody: 0,
++    filteredByWindow: 0,
++    ignoredOtherChat: 0,
++    newerOrEqualToAnchor: 0,
++  };
++}
++
++export function isOnDemandSyncType(syncType: unknown): boolean {
++  return syncType === ON_DEMAND_SYNC_TYPE || syncType === 'ON_DEMAND' || syncType === '6';
++}
++
++export function withoutRecoveredHistory<T extends Record<string, unknown>>(where: T): T & { NOT: { status: string } } {
++  return { ...where, NOT: { status: HISTORY_RECOVERY_STORED_STATUS } };
++}
++
++function isPlainObject(value: unknown): value is Record<string, unknown> {
++  return !!value && typeof value === 'object' && !Array.isArray(value);
++}
++
++function readInteger(value: unknown): number | null {
++  if (typeof value !== 'number' || !Number.isFinite(value) || !Number.isInteger(value)) {
++    return null;
++  }
++  return value;
++}
++
++function validateAnchorTimestamp(value: unknown, errors: string[]): number | null {
++  const timestamp = readInteger(value);
++  if (timestamp === null) {
++    errors.push('A âncora precisa de timestamp inteiro em segundos Unix.');
++    return null;
++  }
++  if (timestamp >= MILLISECOND_TIMESTAMP_FLOOR) {
++    errors.push('A âncora deve usar timestamp em segundos Unix, não milissegundos.');
++    return null;
++  }
++  if (timestamp < ANCHOR_MIN_UNIX_SECONDS || timestamp > ANCHOR_MAX_UNIX_SECONDS) {
++    errors.push('O timestamp da âncora está fora do intervalo aceito de segundos Unix.');
++    return null;
++  }
++  return timestamp;
++}
++
++function validateOptionalWindow(value: unknown, label: string, errors: string[]): number | undefined {
++  if (value === undefined || value === null) {
++    return undefined;
++  }
++  const timestamp = readInteger(value);
++  if (timestamp === null || timestamp >= MILLISECOND_TIMESTAMP_FLOOR) {
++    errors.push(`${label} deve ser segundos Unix, não milissegundos.`);
++    return undefined;
++  }
++  if (timestamp < ANCHOR_MIN_UNIX_SECONDS || timestamp > ANCHOR_MAX_UNIX_SECONDS) {
++    errors.push(`${label} está fora do intervalo aceito.`);
++    return undefined;
++  }
++  return timestamp;
++}
++
++export function validateRecoveryRequest(
++  input: RecoveryRequestInput,
++): { ok: true; value: NormalizedRecoveryRequest } | { ok: false; errors: string[] } {
++  const errors: string[] = [];
++  const remoteJid = typeof input?.remoteJid === 'string' ? input.remoteJid : '';
++  if (!JID_PATTERN.test(remoteJid)) {
++    errors.push('remoteJid deve ser um JID de usuário, grupo, lid ou um identificador sintético de teste.');
++  }
++
++  const anchor = (input?.anchor ?? {}) as RecoveryAnchorInput;
++  const anchorId = typeof anchor.id === 'string' ? anchor.id : '';
++  if (!MESSAGE_ID_PATTERN.test(anchorId)) {
++    errors.push('anchor.id deve ser o identificador real da mensagem âncora, sem texto livre.');
++  }
++  if (typeof anchor.fromMe !== 'boolean') {
++    errors.push('anchor.fromMe deve ser booleano. A recuperação não infere a direção.');
++  }
++  const anchorRemote =
++    typeof anchor.remoteJid === 'string' && anchor.remoteJid.length > 0 ? anchor.remoteJid : remoteJid;
++  if (anchorRemote !== remoteJid) {
++    errors.push('anchor.remoteJid deve ser o mesmo remoteJid da conversa solicitada.');
++  }
++  if (anchor.remoteJid !== undefined && anchor.remoteJid !== null && !JID_PATTERN.test(String(anchor.remoteJid))) {
++    errors.push('anchor.remoteJid possui formato inválido.');
++  }
++  const timestampSeconds = validateAnchorTimestamp(anchor.timestamp, errors);
++
++  const count = readInteger(input?.count);
++  if (count === null || count < HISTORY_RECOVERY_LIMITS.minCount || count > HISTORY_RECOVERY_LIMITS.maxCount) {
++    errors.push(
++      `count deve ser um inteiro entre ${HISTORY_RECOVERY_LIMITS.minCount} e ${HISTORY_RECOVERY_LIMITS.maxCount}.`,
++    );
++  }
++
++  const page = input?.page === undefined || input?.page === null ? 1 : readInteger(input.page);
++  if (page === null || page < HISTORY_RECOVERY_LIMITS.minPage || page > HISTORY_RECOVERY_LIMITS.maxPage) {
++    errors.push(
++      `page deve ser um inteiro entre ${HISTORY_RECOVERY_LIMITS.minPage} e ${HISTORY_RECOVERY_LIMITS.maxPage}.`,
++    );
++  }
++
++  const notBeforeTimestamp = validateOptionalWindow(input?.notBeforeTimestamp, 'notBeforeTimestamp', errors);
++  const notAfterTimestamp = validateOptionalWindow(input?.notAfterTimestamp, 'notAfterTimestamp', errors);
++  if (notBeforeTimestamp !== undefined && notAfterTimestamp !== undefined && notBeforeTimestamp > notAfterTimestamp) {
++    errors.push('notBeforeTimestamp não pode ser maior que notAfterTimestamp.');
++  }
++  if (timestampSeconds !== null && notBeforeTimestamp !== undefined && notBeforeTimestamp >= timestampSeconds) {
++    errors.push(
++      'A recuperação sob demanda só devolve mensagens mais antigas que a âncora. A janela informada está inteiramente depois da âncora.',
++    );
++  }
++
++  if (input?.dryRun !== undefined && input?.dryRun !== null && typeof input.dryRun !== 'boolean') {
++    errors.push('dryRun deve ser booleano.');
++  }
++
++  const timeoutMs =
++    input?.timeoutMs === undefined || input?.timeoutMs === null
++      ? HISTORY_RECOVERY_LIMITS.defaultTimeoutMs
++      : readInteger(input.timeoutMs);
++  if (
++    timeoutMs === null ||
++    timeoutMs < HISTORY_RECOVERY_LIMITS.minTimeoutMs ||
++    timeoutMs > HISTORY_RECOVERY_LIMITS.maxTimeoutMs
++  ) {
++    errors.push(
++      `timeoutMs deve ser um inteiro entre ${HISTORY_RECOVERY_LIMITS.minTimeoutMs} e ${HISTORY_RECOVERY_LIMITS.maxTimeoutMs}.`,
++    );
++  }
++
++  if (errors.length > 0 || timestampSeconds === null || count === null || page === null || timeoutMs === null) {
++    return { ok: false, errors };
++  }
++
++  return {
++    ok: true,
++    value: {
++      remoteJid,
++      anchor: {
++        id: anchorId,
++        remoteJid,
++        fromMe: anchor.fromMe as boolean,
++        timestampSeconds,
++      },
++      count,
++      page,
++      notBeforeTimestamp,
++      notAfterTimestamp,
++      dryRun: input.dryRun === true,
++      timeoutMs,
++    },
++  };
++}
++
++export function unixSecondsFromProtocol(value: unknown): number | null {
++  let numeric: number | null = null;
++  if (typeof value === 'number' && Number.isFinite(value)) {
++    numeric = value;
++  } else if (isPlainObject(value) && typeof value.toNumber === 'function') {
++    const converted = (value.toNumber as () => number)();
++    if (typeof converted === 'number' && Number.isFinite(converted)) {
++      numeric = converted;
++    }
++  }
++  if (numeric === null) {
++    return null;
++  }
++  if (numeric >= MILLISECOND_TIMESTAMP_FLOOR) {
++    numeric = Math.floor(numeric / 1000);
++  }
++  return Math.floor(numeric);
++}
++
++function hasRecoverableBody(message: object | null | undefined): boolean {
++  if (!isPlainObject(message)) {
++    return false;
++  }
++  const keys = Object.keys(message).filter((key) => key !== 'messageContextInfo' && key !== '_evolutionRecovery');
++  return keys.length > 0;
++}
++
++export interface SelectionResult {
++  selected: SelectedRecoveryMessage[];
++  counts: Pick<
++    RecoveryCounts,
++    | 'protocolMessages'
++    | 'acceptedForStorage'
++    | 'duplicates'
++    | 'skippedWithoutBody'
++    | 'filteredByWindow'
++    | 'ignoredOtherChat'
++    | 'newerOrEqualToAnchor'
++  >;
++}
++
++export function selectRecoverableMessages(
++  messages: InboundRecoveryMessage[] | undefined,
++  record: Pick<RecoveryRecord, 'remoteJid' | 'anchor' | 'notBeforeTimestamp' | 'notAfterTimestamp'>,
++): SelectionResult {
++  const counts = {
++    protocolMessages: messages?.length ?? 0,
++    acceptedForStorage: 0,
++    duplicates: 0,
++    skippedWithoutBody: 0,
++    filteredByWindow: 0,
++    ignoredOtherChat: 0,
++    newerOrEqualToAnchor: 0,
++  };
++  const selected: SelectedRecoveryMessage[] = [];
++  const seen = new Set<string>();
++
++  for (const raw of messages ?? []) {
++    const remoteJid = typeof raw?.key?.remoteJid === 'string' ? raw.key.remoteJid : '';
++    if (remoteJid !== record.remoteJid) {
++      counts.ignoredOtherChat += 1;
++      continue;
++    }
++    const id = typeof raw?.key?.id === 'string' ? raw.key.id : '';
++    if (!MESSAGE_ID_PATTERN.test(id) || typeof raw?.key?.fromMe !== 'boolean') {
++      counts.skippedWithoutBody += 1;
++      continue;
++    }
++    if (!hasRecoverableBody(raw.message)) {
++      counts.skippedWithoutBody += 1;
++      continue;
++    }
++    const timestampSeconds = unixSecondsFromProtocol(raw.messageTimestamp);
++    if (timestampSeconds === null) {
++      counts.skippedWithoutBody += 1;
++      continue;
++    }
++    if (timestampSeconds >= record.anchor.timestampSeconds || id === record.anchor.id) {
++      counts.newerOrEqualToAnchor += 1;
++      continue;
++    }
++    if (record.notBeforeTimestamp !== undefined && timestampSeconds < record.notBeforeTimestamp) {
++      counts.filteredByWindow += 1;
++      continue;
++    }
++    if (record.notAfterTimestamp !== undefined && timestampSeconds > record.notAfterTimestamp) {
++      counts.filteredByWindow += 1;
++      continue;
++    }
++    const identity = `${remoteJid}\u0000${id}`;
++    if (seen.has(identity)) {
++      counts.duplicates += 1;
++      continue;
++    }
++    seen.add(identity);
++    const participant = typeof raw.key?.participant === 'string' ? raw.key.participant : undefined;
++    selected.push({
++      id,
++      remoteJid,
++      fromMe: raw.key.fromMe,
++      participant,
++      timestampSeconds,
++      pushName: typeof raw.pushName === 'string' ? raw.pushName : undefined,
++      raw,
++    });
++  }
++
++  counts.acceptedForStorage = selected.length;
++  return { selected, counts };
++}
++
++export function buildProvenance(record: RecoveryRecord, recoveredAtMs: number): RecoveryProvenance {
++  return {
++    provenance: HISTORY_RECOVERY_PROVENANCE,
++    requestId: record.requestId,
++    peerDataRequestSessionId: record.peerDataRequestSessionId,
++    direction: 'older-than-anchor',
++    anchorMessageId: record.anchor.id,
++    anchorFromMe: record.anchor.fromMe,
++    anchorTimestampSeconds: record.anchor.timestampSeconds,
++    syncType: 'ON_DEMAND',
++    recoveredAt: new Date(recoveredAtMs).toISOString(),
++  };
++}
++
++export function toStoredRecoveryRow(
++  selected: SelectedRecoveryMessage,
++  normalizedMessage: Record<string, unknown>,
++  extras: {
++    provenance: RecoveryProvenance;
++    instanceId: string;
++    messageType: string;
++    contextInfo?: unknown;
++    source?: string;
++    pushName?: string | null;
++  },
++): StoredRecoveryRow {
++  const message = { ...normalizedMessage, _evolutionRecovery: extras.provenance };
++  const row: StoredRecoveryRow = {
++    key: {
++      id: selected.id,
++      remoteJid: selected.remoteJid,
++      fromMe: selected.fromMe,
++      ...(selected.participant ? { participant: selected.participant } : {}),
++    },
++    pushName: extras.pushName ?? selected.pushName ?? null,
++    status: HISTORY_RECOVERY_STORED_STATUS,
++    message,
++    messageType: extras.messageType || 'unknown',
++    messageTimestamp: selected.timestampSeconds,
++    instanceId: extras.instanceId,
++    source: extras.source || 'unknown',
++  };
++  if (extras.contextInfo !== undefined) {
++    row.contextInfo = extras.contextInfo;
++  }
++  return row;
++}
++
++export function addCounts(target: RecoveryCounts, extra: Partial<RecoveryCounts>): void {
++  (Object.keys(extra) as Array<keyof RecoveryCounts>).forEach((key) => {
++    target[key] += extra[key] ?? 0;
++  });
++}
+diff --git a/src/api/services/history-recovery/history-recovery.runtime.ts b/src/api/services/history-recovery/history-recovery.runtime.ts
+new file mode 100644
+index 00000000..6ca1052a
+--- /dev/null
++++ b/src/api/services/history-recovery/history-recovery.runtime.ts
+@@ -0,0 +1,268 @@
++import { HISTORY_RECOVERY_STORED_STATUS } from './history-recovery.constants';
++import {
++  applyBaileysEventRouting,
++  HistoryRecoveryCoordinator,
++  safeProtocolError,
++} from './history-recovery.coordinator';
++import { toStoredRecoveryRow } from './history-recovery.policy';
++import {
++  InboundRecoveryMessage,
++  NormalizedStoredMessage,
++  PublicRecoveryView,
++  RecoveryBatch,
++  RecoveryRequestInput,
++  StoredRecoveryRow,
++} from './history-recovery.types';
++
++export interface HistoryRecoveryDeps {
++  connectionState: () => string | undefined;
++  fetchMessageHistory: (
++    count: number,
++    key: { remoteJid: string; fromMe: boolean; id: string },
++    oldestMsgTimestampMs: number,
++  ) => Promise<unknown>;
++  normalize: (message: InboundRecoveryMessage) => NormalizedStoredMessage | null;
++  findExistingIds: (ids: string[], remoteJid: string) => Promise<Set<string>>;
++  insertRows: (rows: StoredRecoveryRow[]) => Promise<void>;
++  persistenceEnabled: () => boolean;
++  schedule?: (fn: () => void, ms: number) => { cancel: () => void };
++  now?: () => number;
++  logger?: { info: (value: string) => void; error: (value: string) => void };
++}
++
++function defaultSchedule(fn: () => void, ms: number): { cancel: () => void } {
++  const timer = setTimeout(fn, ms);
++  return { cancel: () => clearTimeout(timer) };
++}
++
++export class HistoryRecoveryRuntime {
++  private readonly coordinator: HistoryRecoveryCoordinator;
++  private readonly timers = new Map<string, { cancel: () => void }>();
++
++  constructor(private readonly deps: HistoryRecoveryDeps) {
++    this.coordinator = new HistoryRecoveryCoordinator();
++  }
++
++  public async request(input: RecoveryRequestInput): Promise<PublicRecoveryView> {
++    const now = this.clock();
++    const prepared = this.coordinator.prepare(input, now);
++    if (prepared.ok === false) {
++      return prepared.view;
++    }
++    const record = prepared.record;
++    if (record.dryRun) {
++      this.log(record.requestId, 'dry-run');
++      return this.coordinator.toPublic(record);
++    }
++    if (this.deps.connectionState() !== 'open') {
++      this.coordinator.abort(
++        record.requestId,
++        'unavailable',
++        503,
++        'O socket Baileys não está aberto. Nenhuma reconexão, logout ou syncFullHistory foi alterado.',
++        now,
++      );
++      this.log(record.requestId, 'unavailable');
++      return this.coordinator.toPublic(this.coordinator.get(record.requestId, now)!);
++    }
++
++    try {
++      const sessionId = await this.deps.fetchMessageHistory(
++        record.count,
++        {
++          remoteJid: record.remoteJid,
++          fromMe: record.anchor.fromMe,
++          id: record.anchor.id,
++        },
++        record.anchor.timestampSeconds * 1000,
++      );
++      const normalizedSession = sessionId === undefined || sessionId === null ? '' : String(sessionId);
++      if (!normalizedSession) {
++        throw new Error('fetchMessageHistory não retornou identificador de sessão.');
++      }
++      const submittedAt = this.clock();
++      this.coordinator.markSubmitted(record.requestId, normalizedSession, submittedAt);
++      this.armTimer(record.requestId, record.timeoutMs);
++      this.log(record.requestId, 'accepted');
++      return this.coordinator.toPublic(this.coordinator.get(record.requestId, submittedAt)!);
++    } catch (error) {
++      this.coordinator.abort(record.requestId, 'unavailable', 503, safeProtocolError(error), this.clock());
++      this.log(record.requestId, 'unavailable');
++      return this.coordinator.toPublic(this.coordinator.get(record.requestId, this.clock())!);
++    }
++  }
++
++  public status(requestId: string): PublicRecoveryView | { status: 'rejected'; httpStatus: number; error: string } {
++    if (!requestId) {
++      return { status: 'rejected', httpStatus: 400, error: 'requestId é obrigatório.' };
++    }
++    const record = this.coordinator.get(requestId, this.clock());
++    if (!record) {
++      return { status: 'rejected', httpStatus: 404, error: 'Recuperação não encontrada neste processo.' };
++    }
++    return this.coordinator.toPublic(record);
++  }
++
++  public async planAndApply(
++    events: { historySet?: any; upsert?: any },
++    handlers: {
++      passthroughHistory: (payload: any) => Promise<void>;
++      liveUpsert: (payload: { messages: any[]; type?: unknown; requestId?: unknown }) => Promise<void>;
++    },
++  ): Promise<void> {
++    const plan = this.coordinator.planEvents(events, this.clock());
++    if (plan.recoveryBatches.length > 0) {
++      for (const batch of plan.recoveryBatches) {
++        this.disarm(batch.requestId);
++      }
++    }
++    await applyBaileysEventRouting(plan, {
++      passthroughHistory: handlers.passthroughHistory,
++      liveUpsert: handlers.liveUpsert,
++      persistRecovery: (batch) => this.persistBatch(batch),
++      onRecoveryError: (error) =>
++        this.deps.logger?.error(`history-recovery persist failed: ${safeProtocolError(error)}`),
++    });
++  }
++
++  public async persistBatch(batch: RecoveryBatch): Promise<void> {
++    const now = this.clock();
++    if (!this.deps.persistenceEnabled()) {
++      this.coordinator.notePersistence(
++        batch.requestId,
++        { persisted: 0, duplicates: 0, skippedWithoutBody: 0, persistenceDisabled: true },
++        now,
++      );
++      this.log(batch.requestId, 'persistence-disabled');
++      return;
++    }
++
++    const rows: StoredRecoveryRow[] = [];
++    let skippedWithoutBody = 0;
++    for (const selected of batch.messages) {
++      let normalized: NormalizedStoredMessage | null = null;
++      try {
++        normalized = this.deps.normalize(selected.raw);
++      } catch {
++        normalized = null;
++      }
++      if (!normalized?.message || Object.keys(normalized.message).length === 0) {
++        skippedWithoutBody += 1;
++        continue;
++      }
++      rows.push(
++        toStoredRecoveryRow(selected, normalized.message, {
++          provenance: batch.provenance,
++          instanceId: normalized.instanceId,
++          messageType: normalized.messageType,
++          contextInfo: normalized.contextInfo,
++          source: normalized.source,
++          pushName: normalized.pushName,
++        }),
++      );
++    }
++
++    if (rows.length === 0) {
++      this.coordinator.notePersistence(
++        batch.requestId,
++        { persisted: 0, duplicates: 0, skippedWithoutBody, persistenceDisabled: false },
++        now,
++      );
++      return;
++    }
++
++    let existing: Set<string>;
++    try {
++      existing = await this.deps.findExistingIds(
++        rows.map((row) => row.key.id),
++        rows[0].key.remoteJid,
++      );
++    } catch (error) {
++      this.coordinator.notePersistence(
++        batch.requestId,
++        {
++          persisted: 0,
++          duplicates: 0,
++          skippedWithoutBody,
++          persistenceDisabled: false,
++          error: safeProtocolError(error),
++        },
++        now,
++      );
++      return;
++    }
++
++    const fresh = rows.filter((row) => !existing.has(row.key.id));
++    const duplicates = rows.length - fresh.length;
++    if (fresh.some((row) => row.status !== HISTORY_RECOVERY_STORED_STATUS)) {
++      this.coordinator.notePersistence(
++        batch.requestId,
++        {
++          persisted: 0,
++          duplicates,
++          skippedWithoutBody,
++          persistenceDisabled: false,
++          error: 'Linha recuperada sem status HISTORY foi recusada.',
++        },
++        now,
++      );
++      return;
++    }
++    if (fresh.length > 0) {
++      try {
++        await this.deps.insertRows(fresh);
++      } catch (error) {
++        this.coordinator.notePersistence(
++          batch.requestId,
++          {
++            persisted: 0,
++            duplicates,
++            skippedWithoutBody,
++            persistenceDisabled: false,
++            error: safeProtocolError(error),
++          },
++          now,
++        );
++        return;
++      }
++    }
++    this.coordinator.notePersistence(
++      batch.requestId,
++      { persisted: fresh.length, duplicates, skippedWithoutBody, persistenceDisabled: false },
++      now,
++    );
++    this.log(batch.requestId, 'persisted');
++  }
++
++  public audit() {
++    return this.coordinator.auditEntries();
++  }
++
++  private armTimer(requestId: string, timeoutMs: number): void {
++    const schedule = this.deps.schedule ?? defaultSchedule;
++    const timer = schedule(() => {
++      this.timers.delete(requestId);
++      this.coordinator.expire(this.clock());
++      this.log(requestId, 'timeout-check');
++    }, timeoutMs);
++    this.timers.set(requestId, timer);
++  }
++
++  private disarm(requestId: string): void {
++    const timer = this.timers.get(requestId);
++    if (timer) {
++      timer.cancel();
++      this.timers.delete(requestId);
++    }
++  }
++
++  private clock(): number {
++    return this.deps.now ? this.deps.now() : Date.now();
++  }
++
++  private log(requestId: string, status: string): void {
++    this.deps.logger?.info(`history-recovery requestId=${requestId} status=${status}`);
++  }
++}
++
++export { applyBaileysEventRouting };
+diff --git a/src/api/services/history-recovery/history-recovery.types.ts b/src/api/services/history-recovery/history-recovery.types.ts
+new file mode 100644
+index 00000000..55aa0e2c
+--- /dev/null
++++ b/src/api/services/history-recovery/history-recovery.types.ts
+@@ -0,0 +1,269 @@
++import { HISTORY_RECOVERY_PROVENANCE, HISTORY_RECOVERY_STORED_STATUS } from './history-recovery.constants';
++
++export type RecoveryStatus =
++  | 'dry-run'
++  | 'accepted'
++  | 'received'
++  | 'partial'
++  | 'empty'
++  | 'timeout'
++  | 'late-received'
++  | 'unavailable'
++  | 'rejected'
++  | 'conflict'
++  | 'rate-limited';
++
++export interface RecoveryAnchorInput {
++  id?: unknown;
++  remoteJid?: unknown;
++  fromMe?: unknown;
++  timestamp?: unknown;
++}
++
++export interface RecoveryRequestInput {
++  remoteJid?: unknown;
++  anchor?: RecoveryAnchorInput | null;
++  count?: unknown;
++  page?: unknown;
++  notBeforeTimestamp?: unknown;
++  notAfterTimestamp?: unknown;
++  dryRun?: unknown;
++  timeoutMs?: unknown;
++}
++
++export interface NormalizedAnchor {
++  id: string;
++  remoteJid: string;
++  fromMe: boolean;
++  timestampSeconds: number;
++}
++
++export interface NormalizedRecoveryRequest {
++  remoteJid: string;
++  anchor: NormalizedAnchor;
++  count: number;
++  page: number;
++  notBeforeTimestamp?: number;
++  notAfterTimestamp?: number;
++  dryRun: boolean;
++  timeoutMs: number;
++}
++
++export interface RecoveryCounts {
++  protocolMessages: number;
++  acceptedForStorage: number;
++  persisted: number;
++  duplicates: number;
++  skippedWithoutBody: number;
++  filteredByWindow: number;
++  ignoredOtherChat: number;
++  newerOrEqualToAnchor: number;
++}
++
++export interface RecoveryProvenance {
++  provenance: typeof HISTORY_RECOVERY_PROVENANCE;
++  requestId: string;
++  peerDataRequestSessionId: string | null;
++  direction: 'older-than-anchor';
++  anchorMessageId: string;
++  anchorFromMe: boolean;
++  anchorTimestampSeconds: number;
++  syncType: 'ON_DEMAND';
++  recoveredAt: string;
++}
++
++export interface InboundRecoveryMessage {
++  key?: {
++    id?: unknown;
++    remoteJid?: unknown;
++    fromMe?: unknown;
++    participant?: unknown;
++  } | null;
++  message?: object | null;
++  messageTimestamp?: unknown;
++  pushName?: unknown;
++  status?: unknown;
++  participant?: unknown;
++}
++
++export interface SelectedRecoveryMessage {
++  id: string;
++  remoteJid: string;
++  fromMe: boolean;
++  participant?: string;
++  timestampSeconds: number;
++  pushName?: string;
++  raw: InboundRecoveryMessage;
++}
++
++export interface RecoveryRecord {
++  requestId: string;
++  peerDataRequestSessionId: string | null;
++  remoteJid: string;
++  anchor: NormalizedAnchor;
++  count: number;
++  page: number;
++  notBeforeTimestamp?: number;
++  notAfterTimestamp?: number;
++  timeoutMs: number;
++  dryRun: boolean;
++  status: RecoveryStatus | 'reserved';
++  httpStatus: number;
++  createdAt: number;
++  submittedAt?: number;
++  deadlineAt?: number;
++  counts: RecoveryCounts;
++  persistenceDisabled: boolean;
++  lastError?: string;
++  activeRequestId?: string;
++}
++
++export interface PublicRecoveryView {
++  requestId?: string;
++  activeRequestId?: string;
++  status: RecoveryStatus;
++  httpStatus: number;
++  dryRun: boolean;
++  direction: 'older-than-anchor';
++  baseline: {
++    evolution: string;
++    evolutionCommit: string;
++    baileys: string;
++  };
++  remoteJid?: string;
++  anchor?: {
++    id: string;
++    fromMe: boolean;
++    timestampSeconds: number;
++  };
++  limits: {
++    count?: number;
++    page?: number;
++    timeoutMs?: number;
++    maxCount: number;
++    maxPage: number;
++    minTimeoutMs: number;
++    maxTimeoutMs: number;
++  };
++  counts: RecoveryCounts;
++  wouldSend?: {
++    method: 'fetchMessageHistory';
++    count: number;
++    oldestMsgTimestampMs: number;
++    oldestMsgFromMe: boolean;
++    oldestMsgId: string;
++    chatJid: string;
++  };
++  persistence: {
++    table: 'Message';
++    storedStatus: typeof HISTORY_RECOVERY_STORED_STATUS;
++    provenancePath: 'message._evolutionRecovery.provenance';
++    provenanceValue: typeof HISTORY_RECOVERY_PROVENANCE;
++    idempotent: true;
++    preserves: Array<'messageTimestamp' | 'key.fromMe' | 'key.id' | 'key.remoteJid'>;
++    persistenceDisabled: boolean;
++  };
++  delivery: {
++    messagesUpsertWebhook: false;
++    messagesSetWebhook: false;
++    chatbotEmit: false;
++    chatwootEvent: false;
++    readReceipts: false;
++    unreadCounter: false;
++    autosend: false;
++  };
++  integration: {
++    externalDbPoller: {
++      status: 'BLOCKED';
++      requiredSqlExclusion: string;
++      reason: string;
++    };
++  };
++  verification: {
++    liveWhatsAppExecution: false;
++    statement: string;
++  };
++  protocol: {
++    method: 'baileys.fetchMessageHistory';
++    responseEvents: Array<'messaging-history.set' | 'messages.upsert'>;
++    notes: string[];
++  };
++  error?: string;
++  errors?: string[];
++}
++
++export interface HistorySetEvent {
++  messages?: InboundRecoveryMessage[];
++  syncType?: unknown;
++  peerDataRequestSessionId?: unknown;
++  isLatest?: unknown;
++  progress?: unknown;
++}
++
++export interface UpsertEvent {
++  messages?: InboundRecoveryMessage[];
++  type?: unknown;
++  requestId?: unknown;
++}
++
++export interface RecoveryBatch {
++  requestId: string;
++  provenance: RecoveryProvenance;
++  messages: SelectedRecoveryMessage[];
++}
++
++export interface RoutingPlan {
++  passthroughHistorySet: boolean;
++  historyPayload?: any;
++  recoveryBatches: RecoveryBatch[];
++  liveUpsert: { messages: any[]; type?: unknown; requestId?: unknown } | null;
++}
++
++export interface AuditEntry {
++  at: number;
++  requestId: string | null;
++  event: string;
++  status: string;
++  counts: RecoveryCounts;
++}
++
++export interface NormalizedStoredMessage {
++  key: {
++    id: string;
++    remoteJid: string;
++    fromMe: boolean;
++    participant?: string;
++  };
++  pushName?: string | null;
++  message: Record<string, unknown>;
++  contextInfo?: unknown;
++  messageType: string;
++  messageTimestamp: number;
++  instanceId: string;
++  source?: string;
++}
++
++export interface StoredRecoveryRow {
++  key: {
++    id: string;
++    remoteJid: string;
++    fromMe: boolean;
++    participant?: string;
++  };
++  pushName: string | null;
++  status: typeof HISTORY_RECOVERY_STORED_STATUS;
++  message: Record<string, unknown>;
++  contextInfo?: unknown;
++  messageType: string;
++  messageTimestamp: number;
++  instanceId: string;
++  source: string;
++}
++
++export interface PersistTally {
++  persisted: number;
++  duplicates: number;
++  skippedWithoutBody: number;
++  persistenceDisabled: boolean;
++  error?: string;
++}
+diff --git a/src/cli/recover-history.ts b/src/cli/recover-history.ts
+new file mode 100644
+index 00000000..6acefc48
+--- /dev/null
++++ b/src/cli/recover-history.ts
+@@ -0,0 +1,203 @@
++/**
++ * Opt-in CLI for one bounded history recovery request.
++ * Talks only to the local Evolution HTTP API. It does not open a WhatsApp socket.
++ *
++ * API key is read from EVOLUTION_API_KEY. Do not pass secrets as argv.
++ */
++import { parseArgs } from 'node:util';
++
++interface CliArgs {
++  baseUrl: string;
++  instance: string;
++  apiKey: string;
++  remoteJid?: string;
++  anchorId?: string;
++  anchorFromMe?: boolean;
++  anchorTimestamp?: number;
++  count?: number;
++  page?: number;
++  notBefore?: number;
++  notAfter?: number;
++  dryRun: boolean;
++  timeoutMs?: number;
++  requestId?: string;
++  poll: boolean;
++}
++
++const BODY_KEYS = new Set(['message', 'conversation', 'text', 'body', 'base64', 'caption', 'messages']);
++
++function stripSensitive(value: unknown): unknown {
++  if (Array.isArray(value)) {
++    return value.map((item) => stripSensitive(item));
++  }
++  if (!value || typeof value !== 'object') {
++    return value;
++  }
++  const output: Record<string, unknown> = {};
++  for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
++    if (BODY_KEYS.has(key)) {
++      continue;
++    }
++    output[key] = stripSensitive(nested);
++  }
++  return output;
++}
++
++function fail(message: string, code = 2): never {
++  process.stderr.write(`${message}\n`);
++  process.exit(code);
++}
++
++function readArgs(): CliArgs {
++  const { values } = parseArgs({
++    options: {
++      'base-url': { type: 'string', default: process.env.EVOLUTION_API_URL || 'http://127.0.0.1:8080' },
++      instance: { type: 'string', default: process.env.EVOLUTION_INSTANCE },
++      'remote-jid': { type: 'string' },
++      'anchor-id': { type: 'string' },
++      'anchor-from-me': { type: 'string' },
++      'anchor-timestamp': { type: 'string' },
++      count: { type: 'string' },
++      page: { type: 'string' },
++      'not-before': { type: 'string' },
++      'not-after': { type: 'string' },
++      'dry-run': { type: 'boolean', default: false },
++      'timeout-ms': { type: 'string' },
++      'request-id': { type: 'string' },
++      poll: { type: 'boolean', default: false },
++    },
++    strict: true,
++  });
++
++  const apiKey = process.env.EVOLUTION_API_KEY || '';
++  if (!apiKey) {
++    fail('Defina EVOLUTION_API_KEY no ambiente. A chave não é lida de argv.');
++  }
++  if (!values.instance) {
++    fail('Informe --instance ou EVOLUTION_INSTANCE.');
++  }
++
++  return {
++    baseUrl: String(values['base-url']).replace(/\/$/, ''),
++    instance: String(values.instance),
++    apiKey,
++    remoteJid: values['remote-jid'],
++    anchorId: values['anchor-id'],
++    anchorFromMe: values['anchor-from-me'] === undefined ? undefined : values['anchor-from-me'] === 'true',
++    anchorTimestamp: values['anchor-timestamp'] ? Number(values['anchor-timestamp']) : undefined,
++    count: values.count ? Number(values.count) : undefined,
++    page: values.page ? Number(values.page) : undefined,
++    notBefore: values['not-before'] ? Number(values['not-before']) : undefined,
++    notAfter: values['not-after'] ? Number(values['not-after']) : undefined,
++    dryRun: values['dry-run'] === true,
++    timeoutMs: values['timeout-ms'] ? Number(values['timeout-ms']) : undefined,
++    requestId: values['request-id'],
++    poll: values.poll === true,
++  };
++}
++
++async function callApi(args: CliArgs, path: string, init: RequestInit): Promise<{ status: number; body: any }> {
++  const response = await fetch(`${args.baseUrl}${path}`, {
++    ...init,
++    headers: {
++      apikey: args.apiKey,
++      'content-type': 'application/json',
++      ...(init.headers || {}),
++    },
++  });
++  const text = await response.text();
++  let body: unknown = {};
++  if (text) {
++    try {
++      body = JSON.parse(text);
++    } catch {
++      body = { error: 'Resposta não JSON da API.' };
++    }
++  }
++  return { status: response.status, body: stripSensitive(body) };
++}
++
++function exitCode(body: any, httpStatus: number): number {
++  if (httpStatus === 401 || httpStatus === 403) return 2;
++  const status = body?.status;
++  if (status === 'rejected') return 2;
++  if (status === 'unavailable') return 3;
++  if (status === 'timeout') return 4;
++  if (status === 'conflict' || status === 'rate-limited') return 5;
++  if (httpStatus >= 400) return 2;
++  return 0;
++}
++
++function isTerminal(status: string | undefined): boolean {
++  return [
++    'dry-run',
++    'received',
++    'partial',
++    'empty',
++    'timeout',
++    'late-received',
++    'unavailable',
++    'rejected',
++    'conflict',
++    'rate-limited',
++  ].includes(status || '');
++}
++
++async function main(): Promise<void> {
++  const args = readArgs();
++  if (args.requestId && !args.remoteJid) {
++    const status = await callApi(
++      args,
++      `/chat/recoverHistoryStatus/${encodeURIComponent(args.instance)}?requestId=${encodeURIComponent(args.requestId)}`,
++      { method: 'GET' },
++    );
++    process.stdout.write(`${JSON.stringify(status.body, null, 2)}\n`);
++    process.exit(exitCode(status.body, status.status));
++  }
++
++  if (!args.remoteJid || !args.anchorId || args.anchorFromMe === undefined || !args.anchorTimestamp || !args.count) {
++    fail(
++      'Uso: --remote-jid --anchor-id --anchor-from-me true|false --anchor-timestamp <segundos> --count <1-50> [--dry-run] [--poll]',
++    );
++  }
++
++  const payload = {
++    remoteJid: args.remoteJid,
++    anchor: {
++      id: args.anchorId,
++      fromMe: args.anchorFromMe,
++      timestamp: args.anchorTimestamp,
++    },
++    count: args.count,
++    page: args.page,
++    notBeforeTimestamp: args.notBefore,
++    notAfterTimestamp: args.notAfter,
++    dryRun: args.dryRun,
++    timeoutMs: args.timeoutMs,
++  };
++  const created = await callApi(args, `/chat/recoverHistory/${encodeURIComponent(args.instance)}`, {
++    method: 'POST',
++    body: JSON.stringify(payload),
++  });
++
++  let current = created;
++  if (args.poll && created.body?.requestId && created.body?.status === 'accepted') {
++    const deadline = Date.now() + (args.timeoutMs || 45_000) + 5_000;
++    while (Date.now() < deadline && !isTerminal(current.body?.status)) {
++      await new Promise((resolve) => setTimeout(resolve, 2_000));
++      current = await callApi(
++        args,
++        `/chat/recoverHistoryStatus/${encodeURIComponent(args.instance)}?requestId=${encodeURIComponent(created.body.requestId)}`,
++        { method: 'GET' },
++      );
++    }
++  }
++
++  process.stdout.write(`${JSON.stringify(current.body, null, 2)}\n`);
++  process.exit(exitCode(current.body, current.status));
++}
++
++main().catch((error: unknown) => {
++  const message = error instanceof Error ? error.message : 'Falha na CLI de recuperação.';
++  fail(message, 3);
++});
+diff --git a/src/validate/history-recovery.schema.ts b/src/validate/history-recovery.schema.ts
+new file mode 100644
+index 00000000..572c0e82
+--- /dev/null
++++ b/src/validate/history-recovery.schema.ts
+@@ -0,0 +1,29 @@
++import { JSONSchema7 } from 'json-schema';
++import { v4 } from 'uuid';
++
++export const historyRecoverySchema: JSONSchema7 = {
++  $id: v4(),
++  type: 'object',
++  additionalProperties: false,
++  properties: {
++    remoteJid: { type: 'string', minLength: 1, maxLength: 128 },
++    anchor: {
++      type: 'object',
++      additionalProperties: false,
++      properties: {
++        id: { type: 'string', minLength: 6, maxLength: 128 },
++        remoteJid: { type: 'string', minLength: 1, maxLength: 128 },
++        fromMe: { type: 'boolean' },
++        timestamp: { type: 'integer', minimum: 1 },
++      },
++      required: ['id', 'fromMe', 'timestamp'],
++    },
++    count: { type: 'integer', minimum: 1, maximum: 50 },
++    page: { type: 'integer', minimum: 1, maximum: 20 },
++    notBeforeTimestamp: { type: 'integer', minimum: 1 },
++    notAfterTimestamp: { type: 'integer', minimum: 1 },
++    dryRun: { type: 'boolean' },
++    timeoutMs: { type: 'integer', minimum: 5000, maximum: 120000 },
++  },
++  required: ['remoteJid', 'anchor', 'count'],
++};
+diff --git a/test/history-recovery/history-recovery.test.ts b/test/history-recovery/history-recovery.test.ts
+new file mode 100644
+index 00000000..2639a68c
+--- /dev/null
++++ b/test/history-recovery/history-recovery.test.ts
+@@ -0,0 +1,522 @@
++import assert from 'node:assert/strict';
++import { spawn } from 'node:child_process';
++import { createServer } from 'node:http';
++import { readFileSync } from 'node:fs';
++import test from 'node:test';
++
++import express from 'express';
++import { validate } from 'jsonschema';
++
++import { applyBaileysEventRouting } from '../../src/api/services/history-recovery/history-recovery.coordinator';
++import { withoutRecoveredHistory } from '../../src/api/services/history-recovery/history-recovery.policy';
++import { HistoryRecoveryRuntime } from '../../src/api/services/history-recovery/history-recovery.runtime';
++import { historyRecoverySchema } from '../../src/validate/history-recovery.schema';
++
++const JID = 'synthetic-user-a@s.whatsapp.net';
++const OTHER_JID = 'synthetic-user-b@s.whatsapp.net';
++const ANCHOR_ID = 'SYNTHETICANCHOR0001';
++const ANCHOR_TS = 1_700_000_000;
++const BODY = 'synthetic-body-token';
++
++function recoveryInput(overrides: Record<string, unknown> = {}) {
++  return {
++    remoteJid: JID,
++    anchor: { id: ANCHOR_ID, fromMe: false, timestamp: ANCHOR_TS },
++    count: 2,
++    timeoutMs: 5_000,
++    ...overrides,
++  };
++}
++
++function inbound(overrides: Record<string, any> = {}) {
++  return {
++    key: {
++      id: 'SYNTHETICMSG000001',
++      remoteJid: JID,
++      fromMe: false,
++      ...(overrides.key || {}),
++    },
++    messageTimestamp: overrides.messageTimestamp ?? ANCHOR_TS - 100,
++    message: overrides.message === undefined ? { conversation: BODY } : overrides.message,
++    pushName: 'synthetic-push',
++  };
++}
++
++function harness(options?: { open?: boolean; persistence?: boolean }) {
++  let now = 1_800_000_000_000;
++  const timers: { fn: () => void; at: number; cancelled: boolean }[] = [];
++  const rows: any[] = [];
++  const fetchCalls: any[] = [];
++  let lookup: (ids: string[], remoteJid: string) => Promise<Set<string>> = async (ids, remoteJid) =>
++    new Set(rows.filter((row) => row.key.remoteJid === remoteJid && ids.includes(row.key.id)).map((row) => row.key.id));
++  let fetchImpl: (count: number, key: any, ts: number) => Promise<unknown> = async (count, key, ts) => {
++    fetchCalls.push({ count, key, ts });
++    return 'synthetic-session-1';
++  };
++  const runtime = new HistoryRecoveryRuntime({
++    connectionState: () => (options?.open === false ? 'close' : 'open'),
++    fetchMessageHistory: (count, key, ts) => fetchImpl(count, key, ts),
++    normalize: (message) => {
++      if (!message?.message) return null;
++      return {
++        key: {
++          id: String(message.key?.id),
++          remoteJid: String(message.key?.remoteJid),
++          fromMe: message.key?.fromMe === true,
++        },
++        message: { ...(message.message as Record<string, unknown>) },
++        messageType: 'conversation',
++        messageTimestamp: Number(message.messageTimestamp),
++        instanceId: 'synthetic-instance',
++        source: 'web',
++        pushName: null,
++      };
++    },
++    findExistingIds: (ids, remoteJid) => lookup(ids, remoteJid),
++    insertRows: async (incoming) => {
++      rows.push(...incoming.map((row) => JSON.parse(JSON.stringify(row))));
++    },
++    persistenceEnabled: () => options?.persistence !== false,
++    schedule: (fn, ms) => {
++      const entry = { fn, at: now + ms, cancelled: false };
++      timers.push(entry);
++      return {
++        cancel: () => {
++          entry.cancelled = true;
++        },
++      };
++    },
++    now: () => now,
++  });
++
++  return {
++    runtime,
++    rows,
++    fetchCalls,
++    setFetch(impl: typeof fetchImpl) {
++      fetchImpl = impl;
++    },
++    setLookup(impl: typeof lookup) {
++      lookup = impl;
++    },
++    advance(ms: number) {
++      now += ms;
++      for (const timer of timers) {
++        if (!timer.cancelled && timer.at <= now) {
++          timer.cancelled = true;
++          timer.fn();
++        }
++      }
++    },
++    handlers() {
++      const calls = { live: 0, history: 0, liveMessages: [] as any[] };
++      return {
++        calls,
++        passthroughHistory: async () => {
++          calls.history += 1;
++        },
++        liveUpsert: async (payload: { messages?: any[] }) => {
++          calls.live += 1;
++          calls.liveMessages.push(...(payload.messages || []));
++        },
++      };
++    },
++  };
++}
++
++test('dry-run validates and does not call fetchMessageHistory', async () => {
++  const { runtime, fetchCalls } = harness();
++  const view = await runtime.request(recoveryInput({ dryRun: true, page: 2 }));
++  assert.equal(view.status, 'dry-run');
++  assert.equal(view.httpStatus, 200);
++  assert.equal(fetchCalls.length, 0);
++  assert.equal(view.wouldSend?.oldestMsgTimestampMs, ANCHOR_TS * 1000);
++  assert.equal(view.wouldSend?.count, 2);
++  assert.equal(view.verification.liveWhatsAppExecution, false);
++  assert.equal(view.integration.externalDbPoller.status, 'BLOCKED');
++  assert.equal(view.delivery.messagesUpsertWebhook, false);
++  assert.equal(view.delivery.chatbotEmit, false);
++  assert.equal(view.direction, 'older-than-anchor');
++});
++
++test('rejects malformed anchors, bounds, millisecond timestamps and inverted windows', async () => {
++  const { runtime, fetchCalls } = harness();
++  const cases = [
++    recoveryInput({ remoteJid: 'not-a-jid' }),
++    recoveryInput({ anchor: { id: 'x', fromMe: false, timestamp: ANCHOR_TS } }),
++    recoveryInput({ anchor: { id: ANCHOR_ID, fromMe: 'false', timestamp: ANCHOR_TS } }),
++    recoveryInput({ anchor: { id: ANCHOR_ID, fromMe: false, timestamp: ANCHOR_TS * 1000 } }),
++    recoveryInput({ count: 51 }),
++    recoveryInput({ count: 0 }),
++    recoveryInput({ page: 21 }),
++    recoveryInput({ timeoutMs: 1000 }),
++    recoveryInput({ notBeforeTimestamp: ANCHOR_TS }),
++    recoveryInput({ anchor: { id: ANCHOR_ID, remoteJid: OTHER_JID, fromMe: false, timestamp: ANCHOR_TS } }),
++  ];
++  for (const input of cases) {
++    const view = await runtime.request(input);
++    assert.equal(view.status, 'rejected', JSON.stringify(input));
++    assert.equal(view.httpStatus, 400);
++  }
++  assert.equal(fetchCalls.length, 0);
++});
++
++test('closed socket is unavailable and does not fetch or reconnect', async () => {
++  const { runtime, fetchCalls } = harness({ open: false });
++  const view = await runtime.request(recoveryInput());
++  assert.equal(view.status, 'unavailable');
++  assert.equal(view.httpStatus, 503);
++  assert.equal(fetchCalls.length, 0);
++  assert.match(view.error || '', /não está aberto/);
++});
++
++test('accepted request sends one older-than-anchor fetch with millisecond timestamp', async () => {
++  const { runtime, fetchCalls } = harness();
++  const view = await runtime.request(recoveryInput({ page: 2 }));
++  assert.equal(view.status, 'accepted');
++  assert.equal(view.httpStatus, 202);
++  assert.equal(fetchCalls.length, 1);
++  assert.deepEqual(fetchCalls[0].key, { remoteJid: JID, fromMe: false, id: ANCHOR_ID });
++  assert.equal(fetchCalls[0].ts, ANCHOR_TS * 1000);
++  assert.equal(fetchCalls[0].count, 2);
++  assert.equal(view.verification.liveWhatsAppExecution, false);
++});
++
++test('a second request conflicts while the first is in flight', async () => {
++  const { runtime, setFetch } = harness();
++  let release: (value: string) => void = () => undefined;
++  setFetch(
++    () =>
++      new Promise((resolve) => {
++        release = resolve;
++      }),
++  );
++  const pending = runtime.request(recoveryInput());
++  const conflict = await runtime.request(recoveryInput());
++  assert.equal(conflict.status, 'conflict');
++  assert.equal(conflict.httpStatus, 409);
++  release('synthetic-session-1');
++  const accepted = await pending;
++  assert.equal(accepted.status, 'accepted');
++});
++
++test('history.set ON_DEMAND persists original timestamp and fromMe and does not wake live handlers', async () => {
++  const { runtime, rows, handlers } = harness();
++  await runtime.request(recoveryInput());
++  const live = handlers();
++  await runtime.planAndApply(
++    {
++      historySet: {
++        syncType: 6,
++        peerDataRequestSessionId: 'synthetic-session-1',
++        messages: [inbound({ key: { fromMe: true, id: 'SYNTHETICMSG000001' }, messageTimestamp: ANCHOR_TS - 80 })],
++      },
++    },
++    live,
++  );
++  assert.equal(live.calls.live, 0);
++  assert.equal(live.calls.history, 0);
++  assert.equal(rows.length, 1);
++  assert.equal(rows[0].key.fromMe, true);
++  assert.equal(rows[0].key.id, 'SYNTHETICMSG000001');
++  assert.equal(rows[0].key.remoteJid, JID);
++  assert.equal(rows[0].messageTimestamp, ANCHOR_TS - 80);
++  assert.equal(rows[0].status, 'HISTORY');
++  assert.equal(rows[0].message.conversation, BODY);
++  assert.equal(rows[0].message._evolutionRecovery.provenance, 'on-demand-history');
++  assert.equal(rows[0].message._evolutionRecovery.direction, 'older-than-anchor');
++  const status = runtime.status(rows[0].message._evolutionRecovery.requestId);
++  assert.equal(status.verification.liveWhatsAppExecution, false);
++  assert.equal(JSON.stringify(runtime.audit()).includes(BODY), false);
++});
++
++test('duplicate history does not overwrite the original timestamp or fromMe', async () => {
++  const { runtime, rows, handlers } = harness();
++  const created = await runtime.request(recoveryInput());
++  const first = handlers();
++  const message = inbound();
++  await runtime.planAndApply(
++    { historySet: { syncType: 'ON_DEMAND', peerDataRequestSessionId: 'synthetic-session-1', messages: [message, message] } },
++    first,
++  );
++  assert.equal(rows.length, 1);
++  const again = handlers();
++  await runtime.planAndApply(
++    {
++      historySet: {
++        syncType: 6,
++        peerDataRequestSessionId: 'synthetic-session-1',
++        messages: [inbound({ key: { fromMe: true }, messageTimestamp: ANCHOR_TS - 1 })],
++      },
++    },
++    again,
++  );
++  assert.equal(rows.length, 1);
++  assert.equal(rows[0].messageTimestamp, ANCHOR_TS - 100);
++  assert.equal(rows[0].key.fromMe, false);
++  assert.equal(again.calls.live, 0);
++  const status = runtime.status(created.requestId!);
++  assert.ok(status.counts.duplicates >= 1);
++});
++
++test('empty, partial, no-body and out-of-window batches do not fabricate messages', async () => {
++  const { runtime, rows, handlers } = harness();
++  const created = await runtime.request(recoveryInput({ notBeforeTimestamp: ANCHOR_TS - 50 }));
++  const sink = handlers();
++  await runtime.planAndApply(
++    {
++      historySet: {
++        syncType: 6,
++        peerDataRequestSessionId: 'synthetic-session-1',
++        messages: [
++          inbound({ key: { id: 'SYNTHETICMSG000002' }, messageTimestamp: ANCHOR_TS - 10 }),
++          inbound({ key: { id: 'SYNTHETICMSG000003' }, message: null }),
++          inbound({ key: { id: 'SYNTHETICMSG000004', remoteJid: OTHER_JID } }),
++          inbound({ key: { id: 'SYNTHETICMSG000005' }, messageTimestamp: ANCHOR_TS - 500 }),
++          inbound({ key: { id: ANCHOR_ID }, messageTimestamp: ANCHOR_TS - 5 }),
++          inbound({ key: { id: 'SYNTHETICMSG000006' }, messageTimestamp: ANCHOR_TS + 5 }),
++        ],
++      },
++    },
++    sink,
++  );
++  assert.equal(rows.length, 1);
++  assert.equal(rows[0].key.id, 'SYNTHETICMSG000002');
++  assert.equal(JSON.stringify(rows).includes('placeholder'), false);
++  const status = runtime.status(created.requestId!);
++  assert.equal(status.status, 'partial');
++  assert.equal(status.counts.skippedWithoutBody, 1);
++  assert.equal(status.counts.ignoredOtherChat, 1);
++  assert.equal(status.counts.filteredByWindow, 1);
++  assert.ok(status.counts.newerOrEqualToAnchor >= 1);
++  assert.equal(sink.calls.live, 0);
++
++  const emptyRuntime = harness();
++  const emptyCreated = await emptyRuntime.runtime.request(recoveryInput());
++  await emptyRuntime.runtime.planAndApply(
++    { historySet: { syncType: 6, peerDataRequestSessionId: 'synthetic-session-1', messages: [] } },
++    emptyRuntime.handlers(),
++  );
++  assert.equal(emptyRuntime.rows.length, 0);
++  assert.equal(emptyRuntime.runtime.status(emptyCreated.requestId!).status, 'empty');
++});
++
++test('timeout stays isolated and a late upsert with the recovery request id is not live', async () => {
++  const { runtime, rows, handlers, advance } = harness();
++  const created = await runtime.request(recoveryInput());
++  advance(5_000);
++  assert.equal(runtime.status(created.requestId!).status, 'timeout');
++  const sink = handlers();
++  await runtime.planAndApply(
++    {
++      upsert: {
++        type: 'notify',
++        requestId: 'synthetic-session-1',
++        messages: [inbound({ key: { id: 'SYNTHETICMSG000009' }, messageTimestamp: ANCHOR_TS - 30 })],
++      },
++    },
++    sink,
++  );
++  assert.equal(sink.calls.live, 0);
++  assert.equal(rows.length, 1);
++  assert.equal(rows[0].messageTimestamp, ANCHOR_TS - 30);
++  assert.equal(rows[0].key.fromMe, false);
++  assert.equal(runtime.status(created.requestId!).status, 'late-received');
++});
++
++test('genuine live upserts stay live while recovery is isolated', async () => {
++  const { runtime, rows, handlers } = harness();
++  await runtime.request(recoveryInput());
++  const live = handlers();
++  await runtime.planAndApply(
++    {
++      upsert: {
++        type: 'notify',
++        messages: [inbound({ key: { id: 'SYNTHETICLIVE000001' }, messageTimestamp: ANCHOR_TS + 20 })],
++      },
++    },
++    live,
++  );
++  assert.equal(live.calls.live, 1);
++  assert.equal(rows.length, 0);
++
++  const placeholder = handlers();
++  await runtime.planAndApply(
++    {
++      upsert: {
++        type: 'notify',
++        requestId: 'synthetic-placeholder-other',
++        messages: [inbound({ key: { id: 'SYNTHETICLIVE000002' } })],
++      },
++    },
++    placeholder,
++  );
++  assert.equal(placeholder.calls.live, 1);
++  assert.equal(rows.length, 0);
++
++  const recent = handlers();
++  await runtime.planAndApply({ historySet: { syncType: 3, messages: [inbound()] } }, recent);
++  assert.equal(recent.calls.history, 1);
++  assert.equal(rows.length, 0);
++});
++
++test('recovery upsert matching the session id does not call the live handler', async () => {
++  const { runtime, rows, handlers } = harness();
++  await runtime.request(recoveryInput());
++  const sink = handlers();
++  await runtime.planAndApply(
++    {
++      upsert: {
++        type: 'notify',
++        requestId: 'synthetic-session-1',
++        messages: [inbound({ key: { id: 'SYNTHETICMSG000008', fromMe: false } })],
++      },
++    },
++    sink,
++  );
++  assert.equal(sink.calls.live, 0);
++  assert.equal(rows.length, 1);
++  assert.equal(rows[0].status, 'HISTORY');
++});
++
++test('disabled persistence and database lookup failure do not invent rows', async () => {
++  const disabled = harness({ persistence: false });
++  await disabled.runtime.request(recoveryInput());
++  await disabled.runtime.planAndApply(
++    { historySet: { syncType: 6, peerDataRequestSessionId: 'synthetic-session-1', messages: [inbound()] } },
++    disabled.handlers(),
++  );
++  assert.equal(disabled.rows.length, 0);
++
++  const failing = harness();
++  failing.setLookup(async () => {
++    throw new Error('synthetic database offline');
++  });
++  const created = await failing.runtime.request(recoveryInput());
++  await failing.runtime.planAndApply(
++    { historySet: { syncType: 6, peerDataRequestSessionId: 'synthetic-session-1', messages: [inbound()] } },
++    failing.handlers(),
++  );
++  assert.equal(failing.rows.length, 0);
++  assert.match(failing.runtime.status(created.requestId!).error || '', /database offline/);
++});
++
++test('live delivery still runs when recovery persistence throws', async () => {
++  let live = 0;
++  await applyBaileysEventRouting(
++    {
++      passthroughHistorySet: false,
++      recoveryBatches: [
++        {
++          requestId: 'hr_synthetic',
++          provenance: {
++            provenance: 'on-demand-history',
++            requestId: 'hr_synthetic',
++            peerDataRequestSessionId: null,
++            direction: 'older-than-anchor',
++            anchorMessageId: ANCHOR_ID,
++            anchorFromMe: false,
++            anchorTimestampSeconds: ANCHOR_TS,
++            syncType: 'ON_DEMAND',
++            recoveredAt: '2026-01-01T00:00:00.000Z',
++          },
++          messages: [],
++        },
++      ],
++      liveUpsert: { messages: [inbound()] },
++    },
++    {
++      liveUpsert: async () => {
++        live += 1;
++      },
++      passthroughHistory: async () => {
++        throw new Error('history passthrough should not run');
++      },
++      persistRecovery: async () => {
++        throw new Error('synthetic persist failure');
++      },
++    },
++  );
++  assert.equal(live, 1);
++});
++
++test('rate limit is finite after the in-flight request settles', async () => {
++  const { runtime, advance } = harness();
++  for (let attempt = 0; attempt < 30; attempt += 1) {
++    const view = await runtime.request(recoveryInput());
++    assert.equal(view.status, 'accepted');
++    advance(15_000);
++  }
++  const limited = await runtime.request(recoveryInput());
++  assert.equal(limited.status, 'rate-limited');
++  assert.equal(limited.httpStatus, 429);
++});
++
++test('schema and authenticated route contract reject bad input and missing api key', async () => {
++  const invalid = validate({ remoteJid: JID, count: 100 }, historyRecoverySchema);
++  assert.equal(invalid.valid, false);
++  const valid = validate(recoveryInput(), historyRecoverySchema);
++  assert.equal(valid.valid, true);
++
++  const app = express();
++  app.use(express.json());
++  app.post('/chat/recoverHistory/:instanceName', (req, res) => {
++    if (req.get('apikey') !== 'synthetic-api-key') {
++      return res.status(401).json({ error: 'Unauthorized' });
++    }
++    const result = validate(req.body, historyRecoverySchema);
++    if (!result.valid) {
++      return res.status(400).json({ error: 'invalid' });
++    }
++    return res.status(202).json({ status: 'accepted', verification: { liveWhatsAppExecution: false } });
++  });
++  const server = createServer(app);
++  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
++  const port = (server.address() as any).port;
++  try {
++    const unauthenticated = await fetch(`http://127.0.0.1:${port}/chat/recoverHistory/synthetic-instance`, {
++      method: 'POST',
++      headers: { 'content-type': 'application/json' },
++      body: JSON.stringify(recoveryInput()),
++    });
++    assert.equal(unauthenticated.status, 401);
++    const bad = await fetch(`http://127.0.0.1:${port}/chat/recoverHistory/synthetic-instance`, {
++      method: 'POST',
++      headers: { 'content-type': 'application/json', apikey: 'synthetic-api-key' },
++      body: JSON.stringify({ remoteJid: JID }),
++    });
++    assert.equal(bad.status, 400);
++  } finally {
++    await new Promise((resolve) => server.close(resolve));
++  }
++
++  const router = readFileSync('src/api/routes/chat.router.ts', 'utf8');
++  assert.match(router, /routerPath\('recoverHistory'\), \.\.\.guards/);
++  assert.match(router, /routerPath\('recoverHistoryStatus'\), \.\.\.guards/);
++  const chatwoot = readFileSync('src/api/integrations/chatbot/chatwoot/services/chatwoot.service.ts', 'utf8');
++  assert.match(chatwoot, /withoutRecoveredHistory\(/);
++  const service = readFileSync('src/api/integrations/channel/whatsapp/whatsapp.baileys.service.ts', 'utf8');
++  assert.match(service, /planAndApply\(/);
++  assert.equal(service.includes('syncFullHistory = true'), false);
++});
++
++test('unread and chatwoot filters exclude recovered status', () => {
++  const where = withoutRecoveredHistory({ instanceId: 'synthetic-instance', messageTimestamp: { gte: 10 } });
++  assert.deepEqual(where.NOT, { status: 'HISTORY' });
++  assert.equal(where.instanceId, 'synthetic-instance');
++});
++
++test('CLI requires the API key from the environment', async () => {
++  const child = spawn(process.execPath, ['node_modules/tsx/dist/cli.mjs', 'src/cli/recover-history.ts'], {
++    env: { ...process.env, EVOLUTION_API_KEY: '' },
++    cwd: process.cwd(),
++  });
++  let stderr = '';
++  child.stderr.on('data', (chunk) => {
++    stderr += String(chunk);
++  });
++  const code = await new Promise<number>((resolve) => child.on('close', (exitCode) => resolve(exitCode ?? 1)));
++  assert.equal(code, 2);
++  assert.match(stderr, /EVOLUTION_API_KEY/);
++  assert.equal(stderr.includes('synthetic-api-key'), false);
++});

@@ -29,6 +29,7 @@ import {
   GroupUpdateParticipantDto,
   GroupUpdateSettingDto,
 } from '@api/dto/group.dto';
+import { HistoryRecoveryDto } from '@api/dto/history-recovery.dto';
 import { InstanceDto, SetPresenceDto } from '@api/dto/instance.dto';
 import { HandleLabelDto, LabelDto } from '@api/dto/label.dto';
 import {
@@ -59,6 +60,8 @@ import { PrismaRepository, Query } from '@api/repository/repository.service';
 import { chatbotController, waMonitor } from '@api/server.module';
 import { CacheService } from '@api/services/cache.service';
 import { ChannelStartupService } from '@api/services/channel.service';
+import { withoutRecoveredHistory } from '@api/services/history-recovery/history-recovery.policy';
+import { HistoryRecoveryRuntime } from '@api/services/history-recovery/history-recovery.runtime';
 import { Events, MessageSubtype, TypeMediaMessage, wa } from '@api/types/wa.types';
 import { CacheEngine } from '@cache/cacheengine';
 import {
@@ -251,6 +254,44 @@ export class BaileysStartupService extends ChannelStartupService {
   private endSession = false;
   private logBaileys = this.configService.get<Log>('LOG').BAILEYS;
   private eventProcessingQueue: Promise<void> = Promise.resolve();
+  private readonly historyRecovery = new HistoryRecoveryRuntime({
+    connectionState: () => this.stateConnection?.state,
+    fetchMessageHistory: async (count, key, oldestMsgTimestampMs) => {
+      if (!this.client || typeof this.client.fetchMessageHistory !== 'function') {
+        throw new Error('fetchMessageHistory is not available on this Baileys socket');
+      }
+      return this.client.fetchMessageHistory(count, key, oldestMsgTimestampMs);
+    },
+    normalize: (message) => {
+      if (!message?.message || !message.key?.id) {
+        return null;
+      }
+      try {
+        const prepared = this.prepareMessage(message as any);
+        if (!prepared?.message || !prepared?.key?.id) {
+          return null;
+        }
+        return prepared;
+      } catch {
+        return null;
+      }
+    },
+    findExistingIds: (ids, remoteJid) => this.findRecoveredMessageIds(ids, remoteJid),
+    insertRows: async (rows) => {
+      if (rows.length === 0) {
+        return;
+      }
+      await this.prismaRepository.message.createMany({ data: rows as any });
+    },
+    persistenceEnabled: () => {
+      const save = this.configService.get<Database>('DATABASE').SAVE_DATA;
+      return !!(save?.NEW_MESSAGE || save?.HISTORIC);
+    },
+    logger: {
+      info: (value) => this.logger.info(value),
+      error: (value) => this.logger.error(value),
+    },
+  });
 
   // Cache TTL constants (in seconds)
   private readonly MESSAGE_CACHE_TTL_SECONDS = 5 * 60; // 5 minutes - avoid duplicate message processing
@@ -1907,17 +1948,24 @@ export class BaileysStartupService extends ChannelStartupService {
               this.instance.authState.saveCreds();
             }
 
-            if (events['messaging-history.set']) {
-              const payload = events['messaging-history.set'];
-              await this.messageHandle['messaging-history.set'](payload);
-            }
-
-            if (events['messages.upsert']) {
-              const payload = events['messages.upsert'];
-
-              // this.messageProcessor.processMessage(payload, settings);
-              await this.messageHandle['messages.upsert'](payload, settings);
-            }
+            await this.historyRecovery.planAndApply(
+              {
+                historySet: events['messaging-history.set'],
+                upsert: events['messages.upsert'],
+              },
+              {
+                passthroughHistory: (payload) => this.messageHandle['messaging-history.set'](payload),
+                liveUpsert: (payload) =>
+                  this.messageHandle['messages.upsert'](
+                    {
+                      messages: payload.messages as any,
+                      type: payload.type as any,
+                      requestId: payload.requestId as string | undefined,
+                    },
+                    settings,
+                  ),
+              },
+            );
 
             if (events['messages.update']) {
               const payload = events['messages.update'];
@@ -3689,13 +3737,20 @@ export class BaileysStartupService extends ChannelStartupService {
   }
 
   public async getLastMessage(number: string) {
-    const where: any = { key: { remoteJid: number }, instanceId: this.instance.id };
-
-    const messages = await this.prismaRepository.message.findMany({
-      where,
+    const baseWhere: any = { key: { remoteJid: number }, instanceId: this.instance.id };
+    let messages = await this.prismaRepository.message.findMany({
+      where: withoutRecoveredHistory(baseWhere),
       orderBy: { messageTimestamp: 'desc' },
       take: 1,
     });
+
+    if (messages.length === 0) {
+      messages = await this.prismaRepository.message.findMany({
+        where: baseWhere,
+        orderBy: { messageTimestamp: 'desc' },
+        take: 1,
+      });
+    }
 
     if (messages.length === 0) {
       throw new NotFoundException('Messages not found');
@@ -5011,6 +5066,35 @@ export class BaileysStartupService extends ChannelStartupService {
     } catch (error) {
       throw new InternalServerErrorException('Error getCatalog', error.toString());
     }
+  }
+
+  public async recoverMessageHistory(data: HistoryRecoveryDto) {
+    return this.historyRecovery.request(data);
+  }
+
+  public async recoverMessageHistoryStatus(requestId: string) {
+    return this.historyRecovery.status(requestId);
+  }
+
+  private async findRecoveredMessageIds(ids: string[], remoteJid: string): Promise<Set<string>> {
+    if (ids.length === 0) {
+      return new Set();
+    }
+    const existing = await this.prismaRepository.message.findMany({
+      where: {
+        instanceId: this.instanceId,
+        OR: ids.map((id) => ({ key: { path: ['id'], equals: id } })),
+      },
+      select: { key: true },
+    });
+    const found = new Set<string>();
+    for (const row of existing) {
+      const key = row.key as { id?: string; remoteJid?: string };
+      if (key?.id && key.remoteJid === remoteJid) {
+        found.add(key.id);
+      }
+    }
+    return found;
   }
 
   public async fetchMessages(query: Query<Message>) {
