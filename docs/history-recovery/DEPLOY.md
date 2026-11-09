@@ -75,7 +75,7 @@ python3 tools/history-recovery/watcher_guard.py --target /caminho/da/copia.py --
 python3 tools/history-recovery/watcher_guard.py --target /caminho/da/copia.py --rollback
 ```
 
-O padrão é dry-run. `--apply` grava a cópia e cria `copia.py.bak-watcher-guard` mais um sidecar com sha256. `--rollback` devolve os bytes originais. A segunda aplicação não duplica o predicado. Se o layout não bater com `BASE_WHERE` e com o SQL único de `fetch_rows`, a cópia não muda.
+O padrão é dry-run. `--apply` grava a cópia e cria `copia.py.bak-watcher-guard` mais um sidecar com sha256. `--rollback` devolve os bytes originais. A segunda aplicação não duplica o predicado. `fetch_rows` pode concatenar literais com `+`. SQL com variável, f-string, `.format` ou `%` é recusado e a cópia não muda. `endswith("Message")` e `.replace("Message", "")` não são consulta.
 
 Trocar o arquivo vivo e reiniciar o watcher **não** faz parte deste passo e continua bloqueado. O filtro de timestamp do watcher não substitui os dois predicados. A direção do histórico continua sendo mais antiga que a âncora, sem garantia de cobrir a queda inteira.
 

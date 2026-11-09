@@ -29,7 +29,7 @@ Chatwoot `syncLostMessages` neste repositório já ignora `status = HISTORY`. Is
 A ferramenta rejeita a cópia se aparecer qualquer um destes desvios. Para cobrir o arquivo real, o próximo contrato sanitizado precisa trazer só isto:
 
 - o literal exato de `BASE_WHERE` se não for uma string tripla nem concatenação de literais entre parênteses
-- o literal SQL único de `fetch_rows` se a busca `instanceId` + `key->>'id'` estiver partida, ou se houver `ORDER BY`, `GROUP BY` ou `LIMIT`
+- concatenação estática de `fetch_rows` já é aceita (`"… from \"Message\" where \"instanceId\" = … " + "and key->>'id' in (%s)"`). Continua de fora: f-string, `.format`, `%`, nome de variável, `ORDER BY` / `GROUP BY` / `LIMIT`, e qualquer `from "Message"` fora de `candidate_ids` e `fetch_rows`. `endswith("Message")` e `.replace("Message", "")` não são consulta.
 - se `fetch_rows` pode devolver um objeto já montado em vez de reler o SQL
 - a lista de outras filas em memória que acordam sem passar por `fetch_rows`
 

@@ -111,28 +111,171 @@ def function_span(text: str, name: str) -> tuple[int, int] | None:
     return start, end
 
 
-def string_literals(body: str) -> list[tuple[int, int, str]]:
-    found: list[tuple[int, int, str]] = []
+def _unescape(body: str) -> str:
+    out: list[str] = []
     i = 0
     while i < len(body):
-        if body[i] not in ("'", '"'):
+        if body[i] == "\\" and i + 1 < len(body):
+            nxt = body[i + 1]
+            out.append({"n": "\n", "t": "\t", "\\": "\\", "'": "'", '"': '"'}.get(nxt, nxt))
+            i += 2
+            continue
+        out.append(body[i])
+        i += 1
+    return "".join(out)
+
+
+def read_string(text: str, i: int) -> tuple[str, int] | None:
+    if i >= len(text) or text[i] not in ("'", '"'):
+        return None
+    triple = text.startswith(text[i] * 3, i)
+    quote = text[i] * 3 if triple else text[i]
+    end = i + len(quote)
+    raw: list[str] = []
+    while end < len(text) and not text.startswith(quote, end):
+        if text[end] == "\\" and end + 1 < len(text):
+            raw.append(text[end : end + 2])
+            end += 2
+            continue
+        raw.append(text[end])
+        end += 1
+    if not text.startswith(quote, end):
+        return None
+    return _unescape("".join(raw)), end + len(quote)
+
+
+def skip_ws_comments(text: str, i: int) -> int:
+    while i < len(text):
+        if text[i] in " \t\r\n":
             i += 1
             continue
-        triple = body.startswith(body[i] * 3, i)
-        quote = body[i] * 3 if triple else body[i]
-        end = i + len(quote)
-        chars: list[str] = []
-        while end < len(body) and not body.startswith(quote, end):
-            if body[end] == "\\":
-                chars.append(body[end : end + 2])
-                end += 2
-                continue
-            chars.append(body[end])
-            end += 1
-        if not body.startswith(quote, end):
+        if text.startswith("#", i):
+            newline = text.find("\n", i)
+            i = len(text) if newline < 0 else newline + 1
+            continue
+        break
+    return i
+
+
+class StaticExpr:
+    def __init__(self, value: str, end: int, last_token_end: int):
+        self.value = value
+        self.end = end
+        self.last_token_end = last_token_end
+        self.dynamic = False
+
+
+class DynamicExpr:
+    def __init__(self, end: int, sql_like: bool):
+        self.end = end
+        self.dynamic = True
+        self.sql_like = sql_like
+        self.value = ""
+        self.last_token_end = end
+
+
+def _sql_fragment(value: str) -> bool:
+    upper = value.upper()
+    return (
+        "KEY->>'ID'" in upper
+        or '"INSTANCEID"' in upper
+        or "INSTANCEID" in upper
+        or bool(re.search(r'(?i)\b(from|join)\s+"Message"', value))
+        or "WHERE" in upper
+    )
+
+
+def parse_static_expr(text: str, i: int) -> StaticExpr | DynamicExpr | None:
+    i = skip_ws_comments(text, i)
+    parts, i, last_end, saw_piece, dynamic = _parse_static_terms(text, i)
+    if not saw_piece:
+        return None
+    value = "".join(parts)
+    if dynamic:
+        return DynamicExpr(i, _sql_fragment(value))
+    return StaticExpr(value, i, last_end)
+
+
+def _parse_static_terms(text: str, i: int) -> tuple[list[str], int, int, bool, bool]:
+    parts: list[str] = []
+    saw = False
+    last_end = i
+    while True:
+        i = skip_ws_comments(text, i)
+        if i < len(text) and text[i] == "(":
+            inner, i, last_end, inner_saw, inner_dynamic = _parse_static_terms(text, i + 1)
+            i = skip_ws_comments(text, i)
+            if i >= len(text) or text[i] != ")" or not inner_saw or inner_dynamic:
+                return parts + inner, i, last_end, True, True
+            i += 1
+            parts.extend(inner)
+            saw = True
+            last_end = i
+        elif i < len(text) and text[i] in ("'", '"'):
+            lit = read_string(text, i)
+            if lit is None:
+                return parts, i, last_end, True, True
+            parts.append(lit[0])
+            i = lit[1]
+            last_end = i
+            saw = True
+        elif not saw:
+            return parts, i, last_end, False, False
+        else:
             break
-        found.append((i, end + len(quote), "".join(chars)))
-        i = end + len(quote)
+        j = skip_ws_comments(text, i)
+        if j < len(text) and text[j] == "+":
+            nxt = skip_ws_comments(text, j + 1)
+            if nxt >= len(text) or text[nxt] not in ("'", '"', "("):
+                return parts, nxt, last_end, True, True
+            i = nxt
+            continue
+        if j < len(text) and text[j] in ("'", '"', "("):
+            i = j
+            continue
+        return parts, j, last_end, True, False
+
+
+def is_message_query(value: str) -> bool:
+    return re.search(r'(?i)\b(from|join)\s+"Message"', value) is not None
+
+
+def is_hydrate_sql(value: str) -> bool:
+    if re.search(r"(?i)\b(ORDER BY|GROUP BY|LIMIT)\b", value):
+        return False
+    return '"instanceId"' in value and "key->>'id'" in value and "WHERE" in value.upper() and is_message_query(value)
+
+
+def _walk_exprs(body: str) -> list[StaticExpr | DynamicExpr]:
+    found: list[StaticExpr | DynamicExpr] = []
+    i = 0
+    while i < len(body):
+        if body.startswith("#", i):
+            newline = body.find("\n", i)
+            i = len(body) if newline < 0 else newline + 1
+            continue
+        if body.startswith(("f'", 'f"', "F'", 'F"'), i):
+            lit = read_string(body, i + 1)
+            if lit is None:
+                i += 1
+                continue
+            found.append(DynamicExpr(lit[1], _sql_fragment(lit[0]) or "key->>'id'" in lit[0]))
+            i = lit[1]
+            continue
+        if body[i] in ("'", '"'):
+            expr = parse_static_expr(body, i)
+            if expr is None:
+                i += 1
+                continue
+            j = skip_ws_comments(body, expr.end)
+            if not expr.dynamic and body.startswith(".format(", j):
+                expr = DynamicExpr(j + len(".format("), _sql_fragment(expr.value))
+            elif not expr.dynamic and j < len(body) and body[j] == "%" and not body.startswith("%>", j):
+                expr = DynamicExpr(j + 1, _sql_fragment(expr.value))
+            found.append(expr)
+            i = expr.end
+            continue
+        i += 1
     return found
 
 
@@ -188,42 +331,54 @@ def analyze(text: str) -> dict:
         reasons.append("candidate_ids does not reference BASE_WHERE")
 
     hydrate = function_span(text, "fetch_rows")
-    hydrate_literal = None
+    hydrate_expr: StaticExpr | None = None
     if hydrate is None:
         reasons.append("expected exactly one fetch_rows function")
     else:
         body = text[hydrate[0] : hydrate[1]]
-        if any(needle not in body for needle in HYDRATE_NEEDLES):
-            reasons.append("fetch_rows does not show the documented instanceId and key->>'id' lookup")
-        hits = [item for item in string_literals(body) if "key->>'id'" in item[2]]
-        if len(hits) != 1:
-            reasons.append(f"expected exactly one fetch_rows SQL literal containing key->>'id', found {len(hits)}")
-        else:
-            rel_start, rel_end, sql = hits[0]
-            upper = sql.upper()
-            if '"INSTANCEID"' not in upper and '"instanceId"' not in sql:
-                reasons.append("fetch_rows SQL literal does not include instanceId")
-            if "WHERE" not in upper:
-                reasons.append("fetch_rows SQL literal has no WHERE")
-            if any(token in upper for token in ("ORDER BY", "GROUP BY", "LIMIT")):
-                reasons.append("fetch_rows SQL literal has trailing clauses; appending AND would be ambiguous")
-            if partial_guard(sql):
+        dynamic_sql = False
+        matches: list[StaticExpr] = []
+        for expr in _walk_exprs(body):
+            if expr.dynamic:
+                if getattr(expr, "sql_like", False):
+                    dynamic_sql = True
+                continue
+            if is_hydrate_sql(expr.value) or (
+                _sql_fragment(expr.value) and ("key->>'id'" in expr.value or is_message_query(expr.value))
+            ):
+                if is_hydrate_sql(expr.value):
+                    matches.append(expr)
+                elif re.search(r"(?i)\b(ORDER BY|GROUP BY|LIMIT)\b", expr.value):
+                    reasons.append("fetch_rows SQL has ORDER BY, GROUP BY, or LIMIT; appending AND would be ambiguous")
+                elif "key->>'id'" in expr.value or is_message_query(expr.value):
+                    reasons.append(
+                        "fetch_rows SQL is static but does not contain where, \"instanceId\", and key->>'id' together"
+                    )
+        if dynamic_sql:
+            reasons.append("fetch_rows SQL concatenation is dynamic; only string literals joined by + or parentheses are accepted")
+        if len(matches) != 1 and not any("fetch_rows SQL" in reason for reason in reasons):
+            reasons.append(f"expected exactly one statically evaluable fetch_rows lookup, found {len(matches)}")
+        elif len(matches) == 1:
+            chosen = matches[0]
+            if partial_guard(chosen.value):
                 reasons.append("fetch_rows SQL contains a partial history guard")
-            hydrate_literal = (hydrate[0] + rel_start, hydrate[0] + rel_end, sql)
+            else:
+                hydrate_expr = chosen
 
-    message_hits = [match.start() for match in re.finditer(r'"Message"', text)]
-    covered: list[tuple[int, int]] = []
-    if candidate is not None:
-        covered.append(candidate)
-    if hydrate is not None:
-        covered.append(hydrate)
     extras = []
-    for pos in message_hits:
-        if not any(start <= pos < end for start, end in covered):
-            line = text.count("\n", 0, pos) + 1
-            extras.append(line)
+    for expr in _walk_exprs(text):
+        if expr.dynamic or not is_message_query(expr.value):
+            continue
+        pos = expr.last_token_end
+        if candidate is not None and candidate[0] <= pos < candidate[1]:
+            continue
+        if hydrate is not None and hydrate[0] <= pos < hydrate[1]:
+            continue
+        extras.append(text.count("\n", 0, pos) + 1)
     if extras:
-        reasons.append("unexpected Message query outside BASE_WHERE and fetch_rows at lines " + ", ".join(map(str, extras)))
+        reasons.append(
+            "unexpected SQL against \"Message\" outside candidate_ids and fetch_rows at lines " + ", ".join(map(str, extras))
+        )
 
     queues = [name for name in QUEUE_NAMES if re.search(rf"\b{name}\b", text)]
     if queues:
@@ -235,11 +390,11 @@ def analyze(text: str) -> dict:
         base_state = "guarded" if already_guarded(literal) else "open" if needs_guards(literal) else "partial"
     elif base is not None:
         base_state = "partial" if partial_guard(literal) else "open"
-    if hydrate_literal is not None and not partial_guard(hydrate_literal[2]):
+    if hydrate_expr is not None and not partial_guard(hydrate_expr.value):
         hydrate_state = (
-            "guarded" if already_guarded(hydrate_literal[2]) else "open" if needs_guards(hydrate_literal[2]) else "partial"
+            "guarded" if already_guarded(hydrate_expr.value) else "open" if needs_guards(hydrate_expr.value) else "partial"
         )
-    elif hydrate_literal is not None:
+    elif hydrate_expr is not None:
         hydrate_state = "partial"
     if base_state != hydrate_state:
         reasons.append("BASE_WHERE and fetch_rows guard states do not match")
@@ -259,11 +414,10 @@ def analyze(text: str) -> dict:
             "kind": _kind,
         },
         "hydrate": None
-        if hydrate_literal is None
+        if hydrate_expr is None
         else {
-            "start": hydrate_literal[0],
-            "end": hydrate_literal[1],
-            "literal": hydrate_literal[2],
+            "insert_at": hydrate[0] + hydrate_expr.last_token_end,
+            "literal": hydrate_expr.value,
             "state": hydrate_state,
         },
         "coverage": {
@@ -291,9 +445,16 @@ def patched_text(text: str, report: dict) -> str | None:
         base_replacement = '"""' + base_replacement + '"""'
     elif base["kind"] != "triple":
         return None
+    guard_concat = (
+        ' + (" AND '
+        + GUARD_STATUS
+        + '"\n    " AND '
+        + GUARD_PROVENANCE
+        + '")'
+    )
     spans = [
         (base["start"], base["end"], base_replacement),
-        (hydrate["start"], hydrate["end"], _replace_literal(text, hydrate, append_guards(hydrate["literal"]))),
+        (hydrate["insert_at"], hydrate["insert_at"], guard_concat),
     ]
     spans.sort(key=lambda item: item[0], reverse=True)
     updated = text

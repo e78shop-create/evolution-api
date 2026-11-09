@@ -6,7 +6,7 @@ Patch local sobre a baseline de aplicação **2.3.7** (`cd800f2976e1e5b682fbf86a
 - Lotes `messaging-history.set` `ON_DEMAND` e `messages.upsert` com o id dessa solicitação não seguem webhook, chatbot, recibo ou contador de não lidas.
 - Mensagens vivas sem esse id continuam no caminho existente.
 - Linhas gravadas usam `status = HISTORY` e `message._evolutionRecovery.provenance = on-demand-history`, sem substituir timestamp, `fromMe` ou id.
-- Watcher externo que faz polling de `Message` permanece **BLOCKED**. `messageTimestamp >= since` não isola histórico. A ferramenta offline `tools/history-recovery/watcher_guard.py` só altera uma cópia no formato documentado (`BASE_WHERE` e o SQL de `fetch_rows`), em dry-run por omissão, e recusa o arquivo vivo. Aplicar essa cópia e recarregar o watcher exigem autorização separada. Ver `docs/history-recovery/HANDOFF.md`.
+- Watcher externo que faz polling de `Message` permanece **BLOCKED**. `messageTimestamp >= since` não isola histórico. A ferramenta offline aceita `BASE_WHERE` em string tripla e o SQL de `fetch_rows` montado por concatenação estática de literais; rejeita SQL dinâmico. Menções `endswith("Message")` / `.replace("Message", "")` não são tratadas como consulta. Dry-run por omissão. O arquivo vivo continua recusado. Ver `docs/history-recovery/HANDOFF.md`.
 - A direção do protocolo continua sendo mais antiga que a âncora. Não há garantia de recuperar a janela inteira da indisponibilidade.
 
 # 2.3.7 (2025-12-05)

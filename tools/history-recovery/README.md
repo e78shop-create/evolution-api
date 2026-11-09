@@ -26,7 +26,7 @@ Both sites must be unambiguous. Otherwise nothing is written.
 
 1. One `BASE_WHERE` assignment whose text is a triple-quoted string or a parenthesized concatenation of string literals, containing `"instanceId"`, `"messageTimestamp"`, `fromMe`, and `"messageType"`.
 2. One `candidate_ids` function that references `BASE_WHERE`.
-3. One `fetch_rows` function with one SQL literal that contains `WHERE`, `"instanceId"`, and `key->>'id'`, and does not contain `ORDER BY`, `GROUP BY`, or `LIMIT`.
+3. One `fetch_rows` lookup whose SQL is a static concatenation of string literals (`+`, parentheses, or one literal). Evaluated together it must contain `from "Message"`, `where`, `"instanceId"`, and `key->>'id'`, and it must not contain `ORDER BY`, `GROUP BY`, or `LIMIT`. A name, f-string, `.format`, or `%` interpolation in that SQL is rejected. The guard is appended as another static string, so escaped quotes in the original fragments stay untouched.
 
 The inserted predicates, on **both** sites, are:
 
@@ -38,6 +38,8 @@ AND COALESCE(message->'_evolutionRecovery'->>'provenance', '') <> 'on-demand-his
 Existing `fromMe`, timestamp, jid, and `messageType` text is left in place. `messageTimestamp >= since` is not provenance isolation: a recovered row with a recent timestamp still matches the old filter. The new predicates are what exclude it.
 
 `fetch_rows` is patched because an id chosen before the guard, or already sitting in a candidate list, is loaded there with no status filter. The SQL recheck drops that row at hydrate time. This does **not** see queues whose names are absent from the contract.
+
+`endswith("Message")` and `.replace("Message", "")` are type parsing, not queries. Only a string whose value contains `from "Message"` or `join "Message"` counts as another SQL site.
 
 ## Fail closed
 

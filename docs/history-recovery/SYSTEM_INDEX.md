@@ -80,7 +80,7 @@ evento Baileys
 | `docs/history-recovery/USAGE.md` | Contrato HTTP/CLI |
 | `docs/history-recovery/BOT_NOTICE.md` | Limites do que este patch não prova |
 | `docs/history-recovery/history-recovery.patch` | Diff sanitizado do código |
-| `tools/history-recovery/watcher_guard.py` | Inserção offline do guard no formato documentado de `BASE_WHERE` e `fetch_rows`. Dry-run por omissão. Recusa o caminho vivo. |
+| `tools/history-recovery/watcher_guard.py` | Inserção offline. `BASE_WHERE` literal e `fetch_rows` por concatenação estática de strings. Dry-run por omissão. Recusa o caminho vivo. |
 | `tools/history-recovery/test_watcher_guard.py` | Testes sintéticos do guard, sem banco |
 | `tools/history-recovery/fixtures/` | Cópias sintéticas: forma válida, layout quebrado, fila extra, arquivo inesperado |
 
