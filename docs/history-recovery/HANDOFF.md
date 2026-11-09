@@ -18,16 +18,26 @@ O protocolo só busca mensagens **mais antigas** que a âncora. Reconectar com `
 
 ## BLOCKER
 
-O watcher externo que lê `Message` por polling precisa ignorar:
+O watcher externo continua fora do git. O contrato sanitizado confirma a lacuna: `BASE_WHERE` não tem `status <> 'HISTORY'` nem a proveniência, e `fetch_rows` não filtra isso. O filtro `messageTimestamp >= since` não substitui a proveniência.
 
-```sql
-COALESCE(message->'_evolutionRecovery'->>'provenance', '') <> 'on-demand-history'
-AND COALESCE(status, '') <> 'HISTORY'
-```
-
-Sem essa alteração no watcher, **não aplique** a recuperação em produção se esse processo trata linha nova como mensagem nova. O código da API não desliga o watcher nem os webhooks das mensagens vivas. Deploy de ponta a ponta: **BLOCKED** até essa integração existir.
+A ferramenta offline está em `tools/history-recovery/`. Ela é dry-run por omissão, só grava com `--apply`, falha fechada se a forma não for exatamente a documentada, é idempotente e faz rollback byte a byte. Não foi executada no arquivo vivo. Deploy de ponta a ponta: **BLOCKED** até o dono autorizar, em separado, a troca da cópia revisada e o reload do watcher. Este patch não faz nenhum dos dois.
 
 Chatwoot `syncLostMessages` neste repositório já ignora `status = HISTORY`. Isso não cobre o watcher externo.
+
+### O que ainda falta no contrato, sem inventar
+
+A ferramenta rejeita a cópia se aparecer qualquer um destes desvios. Para cobrir o arquivo real, o próximo contrato sanitizado precisa trazer só isto:
+
+- o literal exato de `BASE_WHERE` se não for uma string tripla nem concatenação de literais entre parênteses
+- o literal SQL único de `fetch_rows` se a busca `instanceId` + `key->>'id'` estiver partida, ou se houver `ORDER BY`, `GROUP BY` ou `LIMIT`
+- se `fetch_rows` pode devolver um objeto já montado em vez de reler o SQL
+- a lista de outras filas em memória que acordam sem passar por `fetch_rows`
+
+Sem isso, um guard só em `BASE_WHERE` não esvazia um id que já estava na fila nem um segundo `SELECT` em `"Message"`.
+
+## Corrida de persistência
+
+`persistBatch` no runtime usado pelo Baileys agora entra numa fila. Duas gravações sobrepostas do mesmo id deixam uma linha, com timestamp, `fromMe` e `message._evolutionRecovery`. Um `history.set` seguido de `messages.upsert` com o mesmo id de sessão não reescreve a linha. Depois do timeout, um lote atrasado ainda grava `HISTORY` e a proveniência, e um upsert vivo no meio continua no handler vivo. Isso não cria índice único no PostgreSQL: dois processos da API ainda poderiam inserir duplicata. Esta instalação é um processo.
 
 ## Como operar uma conversa
 
@@ -43,10 +53,11 @@ Aprovação explícita do dono é obrigatória antes de qualquer reload do proce
 
 ```bash
 npm run test:history-recovery
+npm run test:watcher-guard
 npx eslint --ext .ts src/api/services/history-recovery src/cli/recover-history.ts src/api/routes/chat.router.ts src/api/controllers/chat.controller.ts
 ```
 
-Resultado nesta sessão: 17 testes, 0 falhas. ESLint dos arquivos tocados sem erro.
+Nesta sessão do agente: 20 testes TypeScript e 10 testes Python, 0 falhas. A leva anterior de 17 testes TypeScript foi só reportada pelo agente; o APP ainda não executou essa suíte por conta própria. ESLint dos arquivos TypeScript tocados sem erro.
 
 `npx tsc --noEmit` neste ambiente ainda acusa `@prisma/client` sem generate (`DATABASE_PROVIDER` não foi usado; generate e migrate não foram executados). Esses erros também aparecem em controllers que este patch não alterou. Na instalação do dono, com o client já gerado:
 

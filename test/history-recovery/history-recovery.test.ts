@@ -321,7 +321,138 @@ test('timeout stays isolated and a late upsert with the recovery request id is n
   assert.equal(rows.length, 1);
   assert.equal(rows[0].messageTimestamp, ANCHOR_TS - 30);
   assert.equal(rows[0].key.fromMe, false);
+  assert.equal(rows[0].status, 'HISTORY');
+  assert.equal(rows[0].message._evolutionRecovery.provenance, 'on-demand-history');
+  assert.equal(rows[0].message._evolutionRecovery.peerDataRequestSessionId, 'synthetic-session-1');
   assert.equal(runtime.status(created.requestId!).status, 'late-received');
+});
+
+test('late history after a live upsert keeps provenance and does not capture the live row', async () => {
+  const { runtime, rows, handlers, advance } = harness();
+  const created = await runtime.request(recoveryInput());
+  advance(5_000);
+  const live = handlers();
+  await runtime.planAndApply(
+    {
+      upsert: {
+        type: 'notify',
+        messages: [inbound({ key: { id: 'SYNTHETICLIVE000099' }, messageTimestamp: ANCHOR_TS + 15 })],
+      },
+    },
+    live,
+  );
+  assert.equal(live.calls.live, 1);
+  assert.equal(rows.length, 0);
+  const late = handlers();
+  await runtime.planAndApply(
+    {
+      historySet: {
+        syncType: 6,
+        peerDataRequestSessionId: 'synthetic-session-1',
+        messages: [inbound({ key: { id: 'SYNTHETICMSG000077', fromMe: true }, messageTimestamp: ANCHOR_TS - 25 })],
+      },
+    },
+    late,
+  );
+  assert.equal(late.calls.live, 0);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].key.id, 'SYNTHETICMSG000077');
+  assert.equal(rows[0].key.fromMe, true);
+  assert.equal(rows[0].messageTimestamp, ANCHOR_TS - 25);
+  assert.equal(rows[0].status, 'HISTORY');
+  assert.equal(rows[0].message._evolutionRecovery.requestId, created.requestId);
+  assert.equal(rows[0].message.conversation, BODY);
+});
+
+test('overlapping persist calls keep one row and its provenance', async () => {
+  const { runtime, rows, setLookup } = harness();
+  const created = await runtime.request(recoveryInput());
+  let entered = 0;
+  let release: () => void = () => undefined;
+  setLookup(async (ids, remoteJid) => {
+    entered += 1;
+    if (entered === 1) {
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+    }
+    return new Set(rows.filter((row) => row.key.remoteJid === remoteJid && ids.includes(row.key.id)).map((row) => row.key.id));
+  });
+  const message = inbound({ key: { id: 'SYNTHETICMSG000055' }, messageTimestamp: ANCHOR_TS - 40 });
+  const batch = {
+    requestId: created.requestId,
+    provenance: {
+      provenance: 'on-demand-history' as const,
+      requestId: created.requestId!,
+      peerDataRequestSessionId: 'synthetic-session-1',
+      direction: 'older-than-anchor' as const,
+      anchorMessageId: ANCHOR_ID,
+      anchorFromMe: false,
+      anchorTimestampSeconds: ANCHOR_TS,
+      syncType: 'ON_DEMAND' as const,
+      recoveredAt: '2026-01-01T00:00:00.000Z',
+    },
+    messages: [
+      {
+        id: 'SYNTHETICMSG000055',
+        remoteJid: JID,
+        fromMe: false as const,
+        timestampSeconds: ANCHOR_TS - 40,
+        raw: message,
+      },
+    ],
+  };
+  const first = runtime.persistBatch(batch);
+  const second = runtime.persistBatch(batch);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(entered, 1);
+  release();
+  await Promise.all([first, second]);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].messageTimestamp, ANCHOR_TS - 40);
+  assert.equal(rows[0].key.fromMe, false);
+  assert.equal(rows[0].status, 'HISTORY');
+  assert.equal(rows[0].message._evolutionRecovery.provenance, 'on-demand-history');
+  assert.equal(rows[0].message.conversation, BODY);
+});
+
+test('history.set then upsert of the same id does not replace provenance or timestamp', async () => {
+  const { runtime, rows, handlers } = harness();
+  await runtime.request(recoveryInput());
+  const first = handlers();
+  await runtime.planAndApply(
+    {
+      historySet: {
+        syncType: 6,
+        peerDataRequestSessionId: 'synthetic-session-1',
+        messages: [inbound({ key: { id: 'SYNTHETICMSG000066' }, messageTimestamp: ANCHOR_TS - 70 })],
+      },
+    },
+    first,
+  );
+  const second = handlers();
+  await runtime.planAndApply(
+    {
+      upsert: {
+        type: 'notify',
+        requestId: 'synthetic-session-1',
+        messages: [
+          inbound({
+            key: { id: 'SYNTHETICMSG000066', fromMe: true },
+            messageTimestamp: ANCHOR_TS - 5,
+            message: { conversation: 'synthetic-replacement-token' },
+          }),
+        ],
+      },
+    },
+    second,
+  );
+  assert.equal(second.calls.live, 0);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].messageTimestamp, ANCHOR_TS - 70);
+  assert.equal(rows[0].key.fromMe, false);
+  assert.equal(rows[0].message.conversation, BODY);
+  assert.equal(rows[0].message._evolutionRecovery.provenance, 'on-demand-history');
 });
 
 test('genuine live upserts stay live while recovery is isolated', async () => {

@@ -11,7 +11,8 @@ Limites que o texto deste repositório não pode ultrapassar:
 - Nenhum corpo é inventado para preencher a janela da indisponibilidade.
 - Histórico correlacionado não segue o caminho de mensagem nova deste processo.
 - Mensagem viva concorrente continua no caminho antigo.
-- O watcher externo de polling em `Message` não foi alterado. Até ele excluir `message._evolutionRecovery.provenance = on-demand-history` e `status = HISTORY`, a implantação de ponta a ponta está **BLOCKED**.
+- O watcher externo de polling em `Message` não foi alterado no box. A ferramenta offline só mexe numa cópia com a forma documentada e recusa `/home/box/wa-watch/wa_watch.py`. `messageTimestamp >= since` não isola histórico. Até o dono autorizar a aplicação dessa cópia e o reload do watcher, a implantação de ponta a ponta está **BLOCKED**.
+- A direção continua sendo mais antiga que a âncora. Não há garantia de recuperar a janela inteira da indisponibilidade.
 - `verification.liveWhatsAppExecution` é falso. Não anuncie restauração concluída.
 
-Reload do processo exige aprovação explícita do dono. Veja `DEPLOY.md`.
+Reload da API e reload do watcher exigem autorizações explícitas e separadas. Veja `DEPLOY.md`. Nenhum dos dois foi feito.

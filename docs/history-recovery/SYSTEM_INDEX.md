@@ -80,6 +80,9 @@ evento Baileys
 | `docs/history-recovery/USAGE.md` | Contrato HTTP/CLI |
 | `docs/history-recovery/BOT_NOTICE.md` | Limites do que este patch não prova |
 | `docs/history-recovery/history-recovery.patch` | Diff sanitizado do código |
+| `tools/history-recovery/watcher_guard.py` | Inserção offline do guard no formato documentado de `BASE_WHERE` e `fetch_rows`. Dry-run por omissão. Recusa o caminho vivo. |
+| `tools/history-recovery/test_watcher_guard.py` | Testes sintéticos do guard, sem banco |
+| `tools/history-recovery/fixtures/` | Cópias sintéticas: forma válida, layout quebrado, fila extra, arquivo inesperado |
 
 ## Persistência
 
@@ -98,13 +101,15 @@ Recuperação não chama `sendDataWebhook`, `chatbotController.emit`, `readMessa
 
 ## BLOCKER externo
 
-O watcher que faz polling da tabela `Message` **não está neste repositório**. Inserir histórico nessa tabela cria linhas novas com timestamp original. Enquanto o watcher não excluir a proveniência, o fim a fim **não** está seguro.
+O watcher que faz polling da tabela `Message` **não está neste repositório** e não foi editado. O contrato sanitizado mostra `BASE_WHERE` sem `HISTORY` e sem proveniência, e `fetch_rows` carregando por `instanceId` + `key->>'id'` sem esses filtros. `messageTimestamp >= since` **não** isola histórico: uma linha recuperada com timestamp recente ainda passa no filtro antigo.
 
-Filtro obrigatório no watcher:
+A ferramenta `tools/history-recovery/watcher_guard.py` só altera uma **cópia** que tenha exatamente essa forma. Ela acrescenta os dois predicados em `BASE_WHERE` e no SQL de `fetch_rows` (rechecagem de id já escolhido). Não para o loop e não apaga `fromMe`, tipo ou jid. O caminho vivo do box é recusado antes da leitura.
+
+A API continua devolvendo `integration.externalDbPoller.status = "BLOCKED"`. Aplicar a cópia revisada e recarregar o watcher são autorizações separadas. Sem isso, o fim a fim não está seguro.
+
+Filtro obrigatório:
 
 ```sql
-COALESCE(message->'_evolutionRecovery'->>'provenance', '') <> 'on-demand-history'
 AND COALESCE(status, '') <> 'HISTORY'
+AND COALESCE(message->'_evolutionRecovery'->>'provenance', '') <> 'on-demand-history'
 ```
-
-A API devolve `integration.externalDbPoller.status = "BLOCKED"` em toda resposta. Isso não é um sucesso de restauração.

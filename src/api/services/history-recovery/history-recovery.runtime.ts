@@ -38,6 +38,7 @@ function defaultSchedule(fn: () => void, ms: number): { cancel: () => void } {
 export class HistoryRecoveryRuntime {
   private readonly coordinator: HistoryRecoveryCoordinator;
   private readonly timers = new Map<string, { cancel: () => void }>();
+  private persistChain: Promise<void> = Promise.resolve();
 
   constructor(private readonly deps: HistoryRecoveryDeps) {
     this.coordinator = new HistoryRecoveryCoordinator();
@@ -125,7 +126,16 @@ export class HistoryRecoveryRuntime {
     });
   }
 
-  public async persistBatch(batch: RecoveryBatch): Promise<void> {
+  public persistBatch(batch: RecoveryBatch): Promise<void> {
+    const run = this.persistChain.then(() => this.persistBatchExclusive(batch));
+    this.persistChain = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
+  private async persistBatchExclusive(batch: RecoveryBatch): Promise<void> {
     const now = this.clock();
     if (!this.deps.persistenceEnabled()) {
       this.coordinator.notePersistence(

@@ -1,5 +1,5 @@
 diff --git a/.gitignore b/.gitignore
-index 768d8afa..469aaa0e 100644
+index 768d8afa..97a63006 100644
 --- a/.gitignore
 +++ b/.gitignore
 @@ -34,7 +34,8 @@ lerna-debug.log*
@@ -12,11 +12,19 @@ index 768d8afa..469aaa0e 100644
  /src/env.yml
  /store
  *.env
+@@ -44,5 +45,7 @@ lerna-debug.log*
+ .DS_Store
+ *.DS_Store
+ .tool-versions
++__pycache__/
++*.pyc
+ 
+ /prisma/migrations/*
 diff --git a/CHANGELOG.md b/CHANGELOG.md
-index 5102b537..557b0f87 100644
+index 5102b537..b82cbb39 100644
 --- a/CHANGELOG.md
 +++ b/CHANGELOG.md
-@@ -1,3 +1,13 @@
+@@ -1,3 +1,14 @@
 +# Unreleased fork — opt-in on-demand history recovery
 +
 +Patch local sobre a baseline de aplicação **2.3.7** (`cd800f2976e1e5b682fbf86a01ee4d85ae61f370`, Baileys `7.0.0-rc.9`). Não é release upstream. Sem migration e sem troca de dependência.
@@ -25,17 +33,18 @@ index 5102b537..557b0f87 100644
 +- Lotes `messaging-history.set` `ON_DEMAND` e `messages.upsert` com o id dessa solicitação não seguem webhook, chatbot, recibo ou contador de não lidas.
 +- Mensagens vivas sem esse id continuam no caminho existente.
 +- Linhas gravadas usam `status = HISTORY` e `message._evolutionRecovery.provenance = on-demand-history`, sem substituir timestamp, `fromMe` ou id.
-+- Watcher externo que faz polling de `Message` permanece **BLOCKED** até filtrar essa proveniência. Ver `docs/history-recovery/HANDOFF.md`.
++- Watcher externo que faz polling de `Message` permanece **BLOCKED**. `messageTimestamp >= since` não isola histórico. A ferramenta offline `tools/history-recovery/watcher_guard.py` só altera uma cópia no formato documentado (`BASE_WHERE` e o SQL de `fetch_rows`), em dry-run por omissão, e recusa o arquivo vivo. Aplicar essa cópia e recarregar o watcher exigem autorização separada. Ver `docs/history-recovery/HANDOFF.md`.
++- A direção do protocolo continua sendo mais antiga que a âncora. Não há garantia de recuperar a janela inteira da indisponibilidade.
 +
  # 2.3.7 (2025-12-05)
  
  ### Features
 diff --git a/docs/history-recovery/BOT_NOTICE.md b/docs/history-recovery/BOT_NOTICE.md
 new file mode 100644
-index 00000000..be0a9f79
+index 00000000..a4052a03
 --- /dev/null
 +++ b/docs/history-recovery/BOT_NOTICE.md
-@@ -0,0 +1,17 @@
+@@ -0,0 +1,18 @@
 +# BOT_NOTICE
 +
 +Este patch foi escrito por um agente de código no fork público `e78shop-create/evolution-api`, contra a baseline de aplicação 2.3.7 (`cd800f2976e1e5b682fbf86a01ee4d85ae61f370`) e Baileys `7.0.0-rc.9`.
@@ -49,16 +58,17 @@ index 00000000..be0a9f79
 +- Nenhum corpo é inventado para preencher a janela da indisponibilidade.
 +- Histórico correlacionado não segue o caminho de mensagem nova deste processo.
 +- Mensagem viva concorrente continua no caminho antigo.
-+- O watcher externo de polling em `Message` não foi alterado. Até ele excluir `message._evolutionRecovery.provenance = on-demand-history` e `status = HISTORY`, a implantação de ponta a ponta está **BLOCKED**.
++- O watcher externo de polling em `Message` não foi alterado no box. A ferramenta offline só mexe numa cópia com a forma documentada e recusa `/home/box/wa-watch/wa_watch.py`. `messageTimestamp >= since` não isola histórico. Até o dono autorizar a aplicação dessa cópia e o reload do watcher, a implantação de ponta a ponta está **BLOCKED**.
++- A direção continua sendo mais antiga que a âncora. Não há garantia de recuperar a janela inteira da indisponibilidade.
 +- `verification.liveWhatsAppExecution` é falso. Não anuncie restauração concluída.
 +
-+Reload do processo exige aprovação explícita do dono. Veja `DEPLOY.md`.
++Reload da API e reload do watcher exigem autorizações explícitas e separadas. Veja `DEPLOY.md`. Nenhum dos dois foi feito.
 diff --git a/docs/history-recovery/DEPLOY.md b/docs/history-recovery/DEPLOY.md
 new file mode 100644
-index 00000000..8cf7449c
+index 00000000..6202ae1f
 --- /dev/null
 +++ b/docs/history-recovery/DEPLOY.md
-@@ -0,0 +1,71 @@
+@@ -0,0 +1,87 @@
 +# Deploy e rollback — instalação source 2.3.7 sem git
 +
 +Não execute estes passos até o dono aprovar o reload. Este patch não foi aplicado numa instância em execução. Não há tempo de indisponibilidade medido. O efeito esperado de um restart é só o da API: os sockets Baileys reconectam quando o processo volta. PostgreSQL e os arquivos de sessão não são alvo deste procedimento.
@@ -124,6 +134,22 @@ index 00000000..8cf7449c
 +
 +Se `node_modules` não foi trocado, não restaure esse tar. Suba o processo antigo só após nova aprovação. Linhas `HISTORY` já gravadas, se alguma solicitação real tiver ocorrido, permanecem no PostgreSQL. O rollback de código não as apaga. O watcher, se ainda não filtra proveniência, continuaria vendo essas linhas. Não delete mensagens como parte do rollback.
 +
++## Ferramenta do watcher (não é o reload)
++
++O watcher real não está no git e não foi lido. Não aponte `watcher_guard.py` para `/home/box/wa-watch/wa_watch.py`. A ferramenta recusa esse caminho antes de abrir o arquivo.
++
++Numa cópia, fora do processo:
++
++```bash
++python3 tools/history-recovery/watcher_guard.py --target /caminho/da/copia.py
++python3 tools/history-recovery/watcher_guard.py --target /caminho/da/copia.py --apply
++python3 tools/history-recovery/watcher_guard.py --target /caminho/da/copia.py --rollback
++```
++
++O padrão é dry-run. `--apply` grava a cópia e cria `copia.py.bak-watcher-guard` mais um sidecar com sha256. `--rollback` devolve os bytes originais. A segunda aplicação não duplica o predicado. Se o layout não bater com `BASE_WHERE` e com o SQL único de `fetch_rows`, a cópia não muda.
++
++Trocar o arquivo vivo e reiniciar o watcher **não** faz parte deste passo e continua bloqueado. O filtro de timestamp do watcher não substitui os dois predicados. A direção do histórico continua sendo mais antiga que a âncora, sem garantia de cobrir a queda inteira.
++
 +## O que não fazer
 +
 +- Não ligar `syncFullHistory`.
@@ -132,10 +158,10 @@ index 00000000..8cf7449c
 +- Não tratar `counts.persisted > 0` como recuperação completa da queda.
 diff --git a/docs/history-recovery/HANDOFF.md b/docs/history-recovery/HANDOFF.md
 new file mode 100644
-index 00000000..69c6997c
+index 00000000..aed9c41e
 --- /dev/null
 +++ b/docs/history-recovery/HANDOFF.md
-@@ -0,0 +1,63 @@
+@@ -0,0 +1,74 @@
 +# Handoff — recuperação de histórico por conversa
 +
 +Baseline de aplicação: Evolution API **2.3.7**, commit `cd800f2976e1e5b682fbf86a01ee4d85ae61f370`, Baileys **7.0.0-rc.9**. O `main` deste fork, no branch de origem `fa09d378`, só tinha commits de documentação sobre essa tag.
@@ -156,16 +182,26 @@ index 00000000..69c6997c
 +
 +## BLOCKER
 +
-+O watcher externo que lê `Message` por polling precisa ignorar:
++O watcher externo continua fora do git. O contrato sanitizado confirma a lacuna: `BASE_WHERE` não tem `status <> 'HISTORY'` nem a proveniência, e `fetch_rows` não filtra isso. O filtro `messageTimestamp >= since` não substitui a proveniência.
 +
-+```sql
-+COALESCE(message->'_evolutionRecovery'->>'provenance', '') <> 'on-demand-history'
-+AND COALESCE(status, '') <> 'HISTORY'
-+```
-+
-+Sem essa alteração no watcher, **não aplique** a recuperação em produção se esse processo trata linha nova como mensagem nova. O código da API não desliga o watcher nem os webhooks das mensagens vivas. Deploy de ponta a ponta: **BLOCKED** até essa integração existir.
++A ferramenta offline está em `tools/history-recovery/`. Ela é dry-run por omissão, só grava com `--apply`, falha fechada se a forma não for exatamente a documentada, é idempotente e faz rollback byte a byte. Não foi executada no arquivo vivo. Deploy de ponta a ponta: **BLOCKED** até o dono autorizar, em separado, a troca da cópia revisada e o reload do watcher. Este patch não faz nenhum dos dois.
 +
 +Chatwoot `syncLostMessages` neste repositório já ignora `status = HISTORY`. Isso não cobre o watcher externo.
++
++### O que ainda falta no contrato, sem inventar
++
++A ferramenta rejeita a cópia se aparecer qualquer um destes desvios. Para cobrir o arquivo real, o próximo contrato sanitizado precisa trazer só isto:
++
++- o literal exato de `BASE_WHERE` se não for uma string tripla nem concatenação de literais entre parênteses
++- o literal SQL único de `fetch_rows` se a busca `instanceId` + `key->>'id'` estiver partida, ou se houver `ORDER BY`, `GROUP BY` ou `LIMIT`
++- se `fetch_rows` pode devolver um objeto já montado em vez de reler o SQL
++- a lista de outras filas em memória que acordam sem passar por `fetch_rows`
++
++Sem isso, um guard só em `BASE_WHERE` não esvazia um id que já estava na fila nem um segundo `SELECT` em `"Message"`.
++
++## Corrida de persistência
++
++`persistBatch` no runtime usado pelo Baileys agora entra numa fila. Duas gravações sobrepostas do mesmo id deixam uma linha, com timestamp, `fromMe` e `message._evolutionRecovery`. Um `history.set` seguido de `messages.upsert` com o mesmo id de sessão não reescreve a linha. Depois do timeout, um lote atrasado ainda grava `HISTORY` e a proveniência, e um upsert vivo no meio continua no handler vivo. Isso não cria índice único no PostgreSQL: dois processos da API ainda poderiam inserir duplicata. Esta instalação é um processo.
 +
 +## Como operar uma conversa
 +
@@ -181,10 +217,11 @@ index 00000000..69c6997c
 +
 +```bash
 +npm run test:history-recovery
++npm run test:watcher-guard
 +npx eslint --ext .ts src/api/services/history-recovery src/cli/recover-history.ts src/api/routes/chat.router.ts src/api/controllers/chat.controller.ts
 +```
 +
-+Resultado nesta sessão: 17 testes, 0 falhas. ESLint dos arquivos tocados sem erro.
++Nesta sessão do agente: 20 testes TypeScript e 10 testes Python, 0 falhas. A leva anterior de 17 testes TypeScript foi só reportada pelo agente; o APP ainda não executou essa suíte por conta própria. ESLint dos arquivos TypeScript tocados sem erro.
 +
 +`npx tsc --noEmit` neste ambiente ainda acusa `@prisma/client` sem generate (`DATABASE_PROVIDER` não foi usado; generate e migrate não foram executados). Esses erros também aparecem em controllers que este patch não alterou. Na instalação do dono, com o client já gerado:
 +
@@ -201,10 +238,10 @@ index 00000000..69c6997c
 +Restaure o backup de `src/` e `dist/` descrito em `DEPLOY.md`. Não apague sessão nem banco para desfazer este patch.
 diff --git a/docs/history-recovery/SYSTEM_INDEX.md b/docs/history-recovery/SYSTEM_INDEX.md
 new file mode 100644
-index 00000000..f251edcc
+index 00000000..ff122884
 --- /dev/null
 +++ b/docs/history-recovery/SYSTEM_INDEX.md
-@@ -0,0 +1,110 @@
+@@ -0,0 +1,115 @@
 +# SYSTEM_INDEX — recuperação opt-in de histórico (baseline 2.3.7)
 +
 +Mapa do patch. Não é um resultado de execução contra WhatsApp.
@@ -287,6 +324,9 @@ index 00000000..f251edcc
 +| `docs/history-recovery/USAGE.md` | Contrato HTTP/CLI |
 +| `docs/history-recovery/BOT_NOTICE.md` | Limites do que este patch não prova |
 +| `docs/history-recovery/history-recovery.patch` | Diff sanitizado do código |
++| `tools/history-recovery/watcher_guard.py` | Inserção offline do guard no formato documentado de `BASE_WHERE` e `fetch_rows`. Dry-run por omissão. Recusa o caminho vivo. |
++| `tools/history-recovery/test_watcher_guard.py` | Testes sintéticos do guard, sem banco |
++| `tools/history-recovery/fixtures/` | Cópias sintéticas: forma válida, layout quebrado, fila extra, arquivo inesperado |
 +
 +## Persistência
 +
@@ -305,16 +345,18 @@ index 00000000..f251edcc
 +
 +## BLOCKER externo
 +
-+O watcher que faz polling da tabela `Message` **não está neste repositório**. Inserir histórico nessa tabela cria linhas novas com timestamp original. Enquanto o watcher não excluir a proveniência, o fim a fim **não** está seguro.
++O watcher que faz polling da tabela `Message` **não está neste repositório** e não foi editado. O contrato sanitizado mostra `BASE_WHERE` sem `HISTORY` e sem proveniência, e `fetch_rows` carregando por `instanceId` + `key->>'id'` sem esses filtros. `messageTimestamp >= since` **não** isola histórico: uma linha recuperada com timestamp recente ainda passa no filtro antigo.
 +
-+Filtro obrigatório no watcher:
++A ferramenta `tools/history-recovery/watcher_guard.py` só altera uma **cópia** que tenha exatamente essa forma. Ela acrescenta os dois predicados em `BASE_WHERE` e no SQL de `fetch_rows` (rechecagem de id já escolhido). Não para o loop e não apaga `fromMe`, tipo ou jid. O caminho vivo do box é recusado antes da leitura.
++
++A API continua devolvendo `integration.externalDbPoller.status = "BLOCKED"`. Aplicar a cópia revisada e recarregar o watcher são autorizações separadas. Sem isso, o fim a fim não está seguro.
++
++Filtro obrigatório:
 +
 +```sql
-+COALESCE(message->'_evolutionRecovery'->>'provenance', '') <> 'on-demand-history'
 +AND COALESCE(status, '') <> 'HISTORY'
++AND COALESCE(message->'_evolutionRecovery'->>'provenance', '') <> 'on-demand-history'
 +```
-+
-+A API devolve `integration.externalDbPoller.status = "BLOCKED"` em toda resposta. Isso não é um sucesso de restauração.
 diff --git a/docs/history-recovery/USAGE.md b/docs/history-recovery/USAGE.md
 new file mode 100644
 index 00000000..e8666ca4
@@ -405,14 +447,15 @@ index 00000000..e8666ca4
 +
 +`POST /chat/findMessages/:instanceName` devolve as linhas, inclusive as recuperadas. O corpo está em `message`. A marca está em `message._evolutionRecovery` e em `status: "HISTORY"`. Quem trata essa consulta como fila de mensagens novas precisa aplicar o mesmo filtro do watcher.
 diff --git a/package.json b/package.json
-index 56e32fcc..47d1e2a1 100644
+index 56e32fcc..b7d8f785 100644
 --- a/package.json
 +++ b/package.json
-@@ -10,6 +10,7 @@
+@@ -10,6 +10,8 @@
      "start:prod": "node dist/main",
      "dev:server": "tsx watch ./src/main.ts",
      "test": "tsx watch ./test/all.test.ts",
 +    "test:history-recovery": "tsx --test test/history-recovery/*.test.ts",
++    "test:watcher-guard": "python3 -m unittest tools/history-recovery/test_watcher_guard.py",
      "lint": "eslint --fix --ext .ts src",
      "lint:check": "eslint --ext .ts src",
      "commit": "cz",
@@ -1663,10 +1706,10 @@ index 00000000..49e73d14
 +}
 diff --git a/src/api/services/history-recovery/history-recovery.runtime.ts b/src/api/services/history-recovery/history-recovery.runtime.ts
 new file mode 100644
-index 00000000..6ca1052a
+index 00000000..d0eb3a38
 --- /dev/null
 +++ b/src/api/services/history-recovery/history-recovery.runtime.ts
-@@ -0,0 +1,268 @@
+@@ -0,0 +1,278 @@
 +import { HISTORY_RECOVERY_STORED_STATUS } from './history-recovery.constants';
 +import {
 +  applyBaileysEventRouting,
@@ -1707,6 +1750,7 @@ index 00000000..6ca1052a
 +export class HistoryRecoveryRuntime {
 +  private readonly coordinator: HistoryRecoveryCoordinator;
 +  private readonly timers = new Map<string, { cancel: () => void }>();
++  private persistChain: Promise<void> = Promise.resolve();
 +
 +  constructor(private readonly deps: HistoryRecoveryDeps) {
 +    this.coordinator = new HistoryRecoveryCoordinator();
@@ -1794,7 +1838,16 @@ index 00000000..6ca1052a
 +    });
 +  }
 +
-+  public async persistBatch(batch: RecoveryBatch): Promise<void> {
++  public persistBatch(batch: RecoveryBatch): Promise<void> {
++    const run = this.persistChain.then(() => this.persistBatchExclusive(batch));
++    this.persistChain = run.then(
++      () => undefined,
++      () => undefined,
++    );
++    return run;
++  }
++
++  private async persistBatchExclusive(batch: RecoveryBatch): Promise<void> {
 +    const now = this.clock();
 +    if (!this.deps.persistenceEnabled()) {
 +      this.coordinator.notePersistence(
@@ -2456,10 +2509,10 @@ index 00000000..572c0e82
 +};
 diff --git a/test/history-recovery/history-recovery.test.ts b/test/history-recovery/history-recovery.test.ts
 new file mode 100644
-index 00000000..2639a68c
+index 00000000..ced02cd7
 --- /dev/null
 +++ b/test/history-recovery/history-recovery.test.ts
-@@ -0,0 +1,522 @@
+@@ -0,0 +1,653 @@
 +import assert from 'node:assert/strict';
 +import { spawn } from 'node:child_process';
 +import { createServer } from 'node:http';
@@ -2783,7 +2836,138 @@ index 00000000..2639a68c
 +  assert.equal(rows.length, 1);
 +  assert.equal(rows[0].messageTimestamp, ANCHOR_TS - 30);
 +  assert.equal(rows[0].key.fromMe, false);
++  assert.equal(rows[0].status, 'HISTORY');
++  assert.equal(rows[0].message._evolutionRecovery.provenance, 'on-demand-history');
++  assert.equal(rows[0].message._evolutionRecovery.peerDataRequestSessionId, 'synthetic-session-1');
 +  assert.equal(runtime.status(created.requestId!).status, 'late-received');
++});
++
++test('late history after a live upsert keeps provenance and does not capture the live row', async () => {
++  const { runtime, rows, handlers, advance } = harness();
++  const created = await runtime.request(recoveryInput());
++  advance(5_000);
++  const live = handlers();
++  await runtime.planAndApply(
++    {
++      upsert: {
++        type: 'notify',
++        messages: [inbound({ key: { id: 'SYNTHETICLIVE000099' }, messageTimestamp: ANCHOR_TS + 15 })],
++      },
++    },
++    live,
++  );
++  assert.equal(live.calls.live, 1);
++  assert.equal(rows.length, 0);
++  const late = handlers();
++  await runtime.planAndApply(
++    {
++      historySet: {
++        syncType: 6,
++        peerDataRequestSessionId: 'synthetic-session-1',
++        messages: [inbound({ key: { id: 'SYNTHETICMSG000077', fromMe: true }, messageTimestamp: ANCHOR_TS - 25 })],
++      },
++    },
++    late,
++  );
++  assert.equal(late.calls.live, 0);
++  assert.equal(rows.length, 1);
++  assert.equal(rows[0].key.id, 'SYNTHETICMSG000077');
++  assert.equal(rows[0].key.fromMe, true);
++  assert.equal(rows[0].messageTimestamp, ANCHOR_TS - 25);
++  assert.equal(rows[0].status, 'HISTORY');
++  assert.equal(rows[0].message._evolutionRecovery.requestId, created.requestId);
++  assert.equal(rows[0].message.conversation, BODY);
++});
++
++test('overlapping persist calls keep one row and its provenance', async () => {
++  const { runtime, rows, setLookup } = harness();
++  const created = await runtime.request(recoveryInput());
++  let entered = 0;
++  let release: () => void = () => undefined;
++  setLookup(async (ids, remoteJid) => {
++    entered += 1;
++    if (entered === 1) {
++      await new Promise<void>((resolve) => {
++        release = resolve;
++      });
++    }
++    return new Set(rows.filter((row) => row.key.remoteJid === remoteJid && ids.includes(row.key.id)).map((row) => row.key.id));
++  });
++  const message = inbound({ key: { id: 'SYNTHETICMSG000055' }, messageTimestamp: ANCHOR_TS - 40 });
++  const batch = {
++    requestId: created.requestId,
++    provenance: {
++      provenance: 'on-demand-history' as const,
++      requestId: created.requestId!,
++      peerDataRequestSessionId: 'synthetic-session-1',
++      direction: 'older-than-anchor' as const,
++      anchorMessageId: ANCHOR_ID,
++      anchorFromMe: false,
++      anchorTimestampSeconds: ANCHOR_TS,
++      syncType: 'ON_DEMAND' as const,
++      recoveredAt: '2026-01-01T00:00:00.000Z',
++    },
++    messages: [
++      {
++        id: 'SYNTHETICMSG000055',
++        remoteJid: JID,
++        fromMe: false as const,
++        timestampSeconds: ANCHOR_TS - 40,
++        raw: message,
++      },
++    ],
++  };
++  const first = runtime.persistBatch(batch);
++  const second = runtime.persistBatch(batch);
++  await new Promise((resolve) => setTimeout(resolve, 10));
++  assert.equal(entered, 1);
++  release();
++  await Promise.all([first, second]);
++  assert.equal(rows.length, 1);
++  assert.equal(rows[0].messageTimestamp, ANCHOR_TS - 40);
++  assert.equal(rows[0].key.fromMe, false);
++  assert.equal(rows[0].status, 'HISTORY');
++  assert.equal(rows[0].message._evolutionRecovery.provenance, 'on-demand-history');
++  assert.equal(rows[0].message.conversation, BODY);
++});
++
++test('history.set then upsert of the same id does not replace provenance or timestamp', async () => {
++  const { runtime, rows, handlers } = harness();
++  await runtime.request(recoveryInput());
++  const first = handlers();
++  await runtime.planAndApply(
++    {
++      historySet: {
++        syncType: 6,
++        peerDataRequestSessionId: 'synthetic-session-1',
++        messages: [inbound({ key: { id: 'SYNTHETICMSG000066' }, messageTimestamp: ANCHOR_TS - 70 })],
++      },
++    },
++    first,
++  );
++  const second = handlers();
++  await runtime.planAndApply(
++    {
++      upsert: {
++        type: 'notify',
++        requestId: 'synthetic-session-1',
++        messages: [
++          inbound({
++            key: { id: 'SYNTHETICMSG000066', fromMe: true },
++            messageTimestamp: ANCHOR_TS - 5,
++            message: { conversation: 'synthetic-replacement-token' },
++          }),
++        ],
++      },
++    },
++    second,
++  );
++  assert.equal(second.calls.live, 0);
++  assert.equal(rows.length, 1);
++  assert.equal(rows[0].messageTimestamp, ANCHOR_TS - 70);
++  assert.equal(rows[0].key.fromMe, false);
++  assert.equal(rows[0].message.conversation, BODY);
++  assert.equal(rows[0].message._evolutionRecovery.provenance, 'on-demand-history');
 +});
 +
 +test('genuine live upserts stay live while recovery is isolated', async () => {
@@ -2982,3 +3166,828 @@ index 00000000..2639a68c
 +  assert.match(stderr, /EVOLUTION_API_KEY/);
 +  assert.equal(stderr.includes('synthetic-api-key'), false);
 +});
+diff --git a/tools/history-recovery/README.md b/tools/history-recovery/README.md
+new file mode 100644
+index 00000000..053e729d
+--- /dev/null
++++ b/tools/history-recovery/README.md
+@@ -0,0 +1,62 @@
++# Watcher guard tool (offline copy only)
++
++Opt-in inserter for the sanitized `BASE_WHERE` / `fetch_rows` shape. It does not open PostgreSQL, does not read `/home/box/wa-watch/wa_watch.py`, and does not restart a process.
++
++Direction of history recovery remains **older than the anchor**. A guarded watcher does not mean the missed outage window was fully recovered.
++
++## Prerequisites
++
++- Python 3.9+ standard library only. No pip packages, no Node, no database.
++- A **copy** of the watcher. Do not pass the live path. The tool refuses `*/wa-watch/wa_watch.py` before reading it.
++
++## Commands
++
++```bash
++python3 watcher_guard.py --target /path/to/copied_watcher.py
++python3 watcher_guard.py --target /path/to/copied_watcher.py --apply
++python3 watcher_guard.py --target /path/to/copied_watcher.py --rollback
++python3 -m unittest test_watcher_guard.py
++```
++
++Dry-run is the default. `--apply` is the only write. The first apply stores `copied_watcher.py.bak-watcher-guard` and a checksum sidecar. A second apply does not duplicate the predicates. `--rollback` restores the backed-up bytes and then refuses a second rollback.
++
++## What it edits, and only when the shape is exact
++
++Both sites must be unambiguous. Otherwise nothing is written.
++
++1. One `BASE_WHERE` assignment whose text is a triple-quoted string or a parenthesized concatenation of string literals, containing `"instanceId"`, `"messageTimestamp"`, `fromMe`, and `"messageType"`.
++2. One `candidate_ids` function that references `BASE_WHERE`.
++3. One `fetch_rows` function with one SQL literal that contains `WHERE`, `"instanceId"`, and `key->>'id'`, and does not contain `ORDER BY`, `GROUP BY`, or `LIMIT`.
++
++The inserted predicates, on **both** sites, are:
++
++```sql
++AND COALESCE(status, '') <> 'HISTORY'
++AND COALESCE(message->'_evolutionRecovery'->>'provenance', '') <> 'on-demand-history'
++```
++
++Existing `fromMe`, timestamp, jid, and `messageType` text is left in place. `messageTimestamp >= since` is not provenance isolation: a recovered row with a recent timestamp still matches the old filter. The new predicates are what exclude it.
++
++`fetch_rows` is patched because an id chosen before the guard, or already sitting in a candidate list, is loaded there with no status filter. The SQL recheck drops that row at hydrate time. This does **not** see queues whose names are absent from the contract.
++
++## Fail closed
++
++Rejected, with the file unchanged:
++
++- zero or several `BASE_WHERE` assignments
++- missing documented marker or a non-literal right-hand side
++- only one of the two predicates already present
++- another `"Message"` query outside `candidate_ids` and `fetch_rows`
++- `pending_ids`, `retry_queue`, `wake_queue`, or `candidate_queue`
++- the live watcher path
++
++## Still unknown — do not invent
++
++Until a sanitized excerpt is supplied, this tool will not claim the real box file matches:
++
++- the exact `BASE_WHERE` quoting if it is not one of the two literal shapes
++- the exact `fetch_rows` SQL if the lookup is split across fragments or has `ORDER BY` / `LIMIT`
++- whether `fetch_rows` can return an already built object instead of re-reading SQL
++- any other in-memory list that wakes without calling `fetch_rows`
++
++Deployment stays **BLOCKED** until the owner separately authorizes applying the reviewed copy and reloading the watcher. This tool does not do that reload.
+diff --git a/tools/history-recovery/fixtures/changed_layout.py b/tools/history-recovery/fixtures/changed_layout.py
+new file mode 100644
+index 00000000..0bd905db
+--- /dev/null
++++ b/tools/history-recovery/fixtures/changed_layout.py
+@@ -0,0 +1,18 @@
++"""BASE_WHERE lost a documented marker."""
++
++BASE_WHERE = """
++"instanceId" = (select id from "Instance" where name = %s)
++AND coalesce(key->>'fromMe','false') = 'false'
++"""
++
++
++def candidate_ids(since):
++    return BASE_WHERE
++
++
++def fetch_rows(keyids):
++    sql = """
++    SELECT id FROM "Message"
++    WHERE "instanceId" = %s AND key->>'id' IN %s
++    """
++    return sql
+diff --git a/tools/history-recovery/fixtures/extra_queue.py b/tools/history-recovery/fixtures/extra_queue.py
+new file mode 100644
+index 00000000..a223f7b9
+--- /dev/null
++++ b/tools/history-recovery/fixtures/extra_queue.py
+@@ -0,0 +1,24 @@
++"""Second Message reader outside the documented functions."""
++
++BASE_WHERE = """
++"instanceId" = (select id from "Instance" where name = %s)
++AND "messageTimestamp" >= %s
++AND coalesce(key->>'fromMe','false') = 'false'
++AND (remoteJid matches user/lid/allowed-group patterns)
++AND "messageType" NOT IN %s
++"""
++
++
++def candidate_ids(since):
++    return BASE_WHERE
++
++
++def fetch_rows(keyids):
++    sql = """
++    SELECT id FROM "Message" WHERE "instanceId" = %s AND key->>'id' IN %s
++    """
++    return sql
++
++
++def retry_ids():
++    return 'SELECT id FROM "Message" WHERE "messageTimestamp" >= %s'
+diff --git a/tools/history-recovery/fixtures/synthetic_watcher.py b/tools/history-recovery/fixtures/synthetic_watcher.py
+new file mode 100644
+index 00000000..3ec52c1d
+--- /dev/null
++++ b/tools/history-recovery/fixtures/synthetic_watcher.py
+@@ -0,0 +1,28 @@
++"""Synthetic watcher shape. No live identifiers."""
++
++INTERVAL = 30
++SKIP_TYPES = ("stub", "protocol")
++
++
++BASE_WHERE = """
++"instanceId" = (select id from "Instance" where name = %s)
++AND "messageTimestamp" >= %s
++AND coalesce(key->>'fromMe','false') = 'false'
++AND (remoteJid matches user/lid/allowed-group patterns)
++AND "messageType" NOT IN %s
++"""
++
++
++def candidate_ids(since):
++    sql = "SELECT id FROM \"Message\" WHERE " + BASE_WHERE
++    return sql, since
++
++
++def fetch_rows(keyids):
++    sql = """
++    SELECT id, status, message
++    FROM "Message"
++    WHERE "instanceId" = %s
++      AND key->>'id' IN %s
++    """
++    return sql, keyids
+diff --git a/tools/history-recovery/fixtures/unexpected.py b/tools/history-recovery/fixtures/unexpected.py
+new file mode 100644
+index 00000000..87eeaf8c
+--- /dev/null
++++ b/tools/history-recovery/fixtures/unexpected.py
+@@ -0,0 +1,4 @@
++"""Not a watcher."""
++
++def unrelated():
++    return "synthetic-only"
+diff --git a/tools/history-recovery/test_watcher_guard.py b/tools/history-recovery/test_watcher_guard.py
+new file mode 100644
+index 00000000..ea53dbca
+--- /dev/null
++++ b/tools/history-recovery/test_watcher_guard.py
+@@ -0,0 +1,155 @@
++"""Synthetic checks for the offline watcher guard. No database and no live file."""
++
++import json
++import shutil
++import subprocess
++import sys
++import tempfile
++import unittest
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parent
++sys.path.insert(0, str(ROOT))
++
++import watcher_guard as guard  # noqa: E402
++
++FIXTURES = ROOT / "fixtures"
++SINCE = 1_700_000_000
++SKIP = {"stub", "protocol"}
++
++
++def row(**overrides):
++    base = {
++        "messageTimestamp": SINCE + 10,
++        "fromMe": False,
++        "jidAllowed": True,
++        "messageType": "conversation",
++        "status": None,
++        "message": None,
++    }
++    base.update(overrides)
++    return base
++
++
++def run(args, cwd):
++    completed = subprocess.run(
++        [sys.executable, str(ROOT / "watcher_guard.py"), *args],
++        cwd=cwd,
++        check=False,
++        capture_output=True,
++        text=True,
++    )
++    payload = json.loads(completed.stdout)
++    return completed.returncode, payload
++
++
++class GuardSemantics(unittest.TestCase):
++    def test_history_status_alone_is_excluded_and_timestamp_would_have_allowed_it(self):
++        sample = row(status="HISTORY", message=None, messageTimestamp=SINCE + 5)
++        self.assertTrue(guard.legacy_candidate(sample, SINCE, SKIP))
++        self.assertFalse(guard.guarded_candidate(sample, SINCE, SKIP))
++
++    def test_provenance_alone_is_excluded(self):
++        sample = row(
++            status=None,
++            message={"conversation": "synthetic-body-token", "_evolutionRecovery": {"provenance": "on-demand-history"}},
++        )
++        self.assertTrue(guard.legacy_candidate(sample, SINCE, SKIP))
++        self.assertFalse(guard.guarded_candidate(sample, SINCE, SKIP))
++
++    def test_null_status_and_provenance_still_pass_live_filters(self):
++        sample = row(status=None, message=None, fromMe=None)
++        self.assertTrue(guard.guarded_candidate(sample, SINCE, SKIP))
++        delivered = row(status="DELIVERY_ACK", message={"conversation": "synthetic-live-token"})
++        self.assertTrue(guard.guarded_candidate(delivered, SINCE, SKIP))
++        self.assertFalse(guard.guarded_candidate(row(fromMe=True), SINCE, SKIP))
++        self.assertFalse(guard.guarded_candidate(row(messageType="stub"), SINCE, SKIP))
++        self.assertFalse(guard.guarded_candidate(row(messageTimestamp=SINCE - 1), SINCE, SKIP))
++
++    def test_live_row_stays_while_recovered_sibling_does_not(self):
++        live = row(status="DELIVERY_ACK", message={"conversation": "synthetic-live-token"})
++        history = row(status="HISTORY", message={"_evolutionRecovery": {"provenance": "on-demand-history"}})
++        kept = [item for item in (live, history) if guard.guarded_candidate(item, SINCE, SKIP)]
++        self.assertEqual(kept, [live])
++
++
++class PatchTool(unittest.TestCase):
++    def copy(self, name):
++        directory = tempfile.TemporaryDirectory()
++        target = Path(directory.name) / "copied_watcher.py"
++        shutil.copy(FIXTURES / name, target)
++        return directory, target
++
++    def test_dry_run_does_not_write(self):
++        directory, target = self.copy("synthetic_watcher.py")
++        original = target.read_bytes()
++        code, payload = run(["--target", str(target)], directory.name)
++        self.assertEqual(code, 0)
++        self.assertEqual(payload["mode"], "dry-run")
++        self.assertTrue(payload["wouldChange"])
++        self.assertFalse(payload["changed"])
++        self.assertEqual(target.read_bytes(), original)
++        self.assertIn("fromMe", target.read_text(encoding="utf-8"))
++        directory.cleanup()
++
++    def test_apply_is_idempotent_and_keeps_live_filters(self):
++        directory, target = self.copy("synthetic_watcher.py")
++        code, first = run(["--target", str(target), "--apply"], directory.name)
++        self.assertEqual(code, 0)
++        self.assertTrue(first["changed"])
++        text = target.read_text(encoding="utf-8")
++        self.assertEqual(text.count(guard.GUARD_STATUS), 2)
++        self.assertEqual(text.count(guard.GUARD_PROVENANCE), 2)
++        self.assertIn('"messageTimestamp"', text)
++        self.assertIn("fromMe", text)
++        self.assertIn('"messageType"', text)
++        code, second = run(["--target", str(target), "--apply"], directory.name)
++        self.assertEqual(code, 0)
++        self.assertTrue(second["alreadyApplied"])
++        self.assertFalse(second["changed"])
++        self.assertEqual(target.read_text(encoding="utf-8").count(guard.GUARD_STATUS), 2)
++        directory.cleanup()
++
++    def test_unexpected_source_is_rejected(self):
++        directory, target = self.copy("unexpected.py")
++        original = target.read_bytes()
++        code, payload = run(["--target", str(target), "--apply"], directory.name)
++        self.assertEqual(code, 2)
++        self.assertFalse(payload["ok"])
++        self.assertEqual(target.read_bytes(), original)
++        directory.cleanup()
++
++    def test_changed_layout_and_extra_queue_are_rejected(self):
++        for name in ("changed_layout.py", "extra_queue.py"):
++            directory, target = self.copy(name)
++            original = target.read_bytes()
++            code, payload = run(["--target", str(target), "--apply"], directory.name)
++            self.assertEqual(code, 2, name)
++            self.assertFalse(payload["ok"], payload)
++            self.assertEqual(target.read_bytes(), original)
++            directory.cleanup()
++
++    def test_rollback_restores_original_bytes(self):
++        directory, target = self.copy("synthetic_watcher.py")
++        original = target.read_bytes()
++        code, _payload = run(["--target", str(target), "--apply"], directory.name)
++        self.assertEqual(code, 0)
++        self.assertNotEqual(target.read_bytes(), original)
++        code, payload = run(["--target", str(target), "--rollback"], directory.name)
++        self.assertEqual(code, 0)
++        self.assertTrue(payload["ok"])
++        self.assertEqual(target.read_bytes(), original)
++        code, again = run(["--target", str(target), "--rollback"], directory.name)
++        self.assertEqual(code, 2)
++        self.assertFalse(again["ok"])
++        self.assertEqual(target.read_bytes(), original)
++        directory.cleanup()
++
++    def test_production_path_is_refused_unread(self):
++        code, payload = run(["--target", "/home/box/wa-watch/wa_watch.py", "--apply"], ROOT)
++        self.assertEqual(code, 3)
++        self.assertIn("refusing", payload["reasons"][0])
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/tools/history-recovery/watcher_guard.py b/tools/history-recovery/watcher_guard.py
+new file mode 100644
+index 00000000..0661b9af
+--- /dev/null
++++ b/tools/history-recovery/watcher_guard.py
+@@ -0,0 +1,492 @@
++#!/usr/bin/env python3
++"""Offline, opt-in guard inserter for a copied watcher file.
++
++Default is dry-run. --apply writes only after the copied source matches the
++sanitized BASE_WHERE / fetch_rows shape. The documented production path is
++refused before the file is read. This tool does not start, stop, or reload a
++watcher and does not open PostgreSQL.
++
++The messageTimestamp filter is not provenance isolation. Both SQL predicates
++are required, on the candidate predicate and on the hydrate query.
++"""
++
++from __future__ import annotations
++
++import argparse
++import hashlib
++import json
++import re
++import sys
++from pathlib import Path
++
++GUARD_STATUS = "COALESCE(status, '') <> 'HISTORY'"
++GUARD_PROVENANCE = "COALESCE(message->'_evolutionRecovery'->>'provenance', '') <> 'on-demand-history'"
++GUARDS = (GUARD_STATUS, GUARD_PROVENANCE)
++MARKERS = ('"instanceId"', '"messageTimestamp"', "fromMe", '"messageType"')
++FORBIDDEN_PATHS = {"/home/box/wa-watch/wa_watch.py"}
++QUEUE_NAMES = ("pending_ids", "retry_queue", "wake_queue", "candidate_queue")
++HYDRATE_NEEDLES = ('"instanceId"', "key->>'id'")
++
++BACKUP_SUFFIX = ".bak-watcher-guard"
++SIDECAR_SUFFIX = ".watcher-guard-backup.json"
++
++
++def forbidden(path: Path) -> bool:
++    resolved = path.resolve().as_posix()
++    return resolved in FORBIDDEN_PATHS or resolved.endswith("/wa-watch/wa_watch.py")
++
++
++def sha256(data: bytes) -> str:
++    return hashlib.sha256(data).hexdigest()
++
++
++def assignment_spans(text: str, name: str) -> list[re.Match[str]]:
++    return list(re.finditer(rf"(?m)^[ \t]*{name}[ \t]*=[ \t]*", text))
++
++
++def extract_expression(text: str, start: int) -> tuple[str, int, int] | None:
++    """Return (literal contents, content_start, content_end) for a supported RHS."""
++    if text.startswith('"""', start) or text.startswith("'''", start):
++        quote = text[start : start + 3]
++        end = text.find(quote, start + 3)
++        if end < 0:
++            return None
++        return text[start + 3 : end], start + 3, end, "triple"
++    if text.startswith("(", start):
++        depth = 0
++        i = start
++        pieces: list[str] = []
++        while i < len(text):
++            char = text[i]
++            if char == "(":
++                depth += 1
++                i += 1
++                continue
++            if char == ")":
++                depth -= 1
++                if depth == 0:
++                    return "".join(pieces), start, i + 1, "paren"
++                i += 1
++                continue
++            if char in " \t\r\n":
++                i += 1
++                continue
++            if text.startswith("#", i):
++                newline = text.find("\n", i)
++                i = len(text) if newline < 0 else newline + 1
++                continue
++            if char in ("'", '"'):
++                triple = text.startswith(char * 3, i)
++                quote = char * 3 if triple else char
++                end = i + len(quote)
++                body: list[str] = []
++                while end < len(text) and not text.startswith(quote, end):
++                    if text[end] == "\\":
++                        nxt = text[end + 1] if end + 1 < len(text) else ""
++                        body.append({"n": "\n", "t": "\t", "\\": "\\", "'": "'", '"': '"'}.get(nxt, nxt))
++                        end += 2
++                        continue
++                    body.append(text[end])
++                    end += 1
++                if not text.startswith(quote, end):
++                    return None
++                pieces.append("".join(body))
++                i = end + len(quote)
++                continue
++            return None
++        if depth == 0:
++            return "".join(pieces), start, i, "paren"
++        return None
++    return None
++
++
++def function_span(text: str, name: str) -> tuple[int, int] | None:
++    matches = list(re.finditer(rf"(?m)^def {name}\s*\(.*\)\s*:", text))
++    if len(matches) != 1:
++        return None
++    start = matches[0].start()
++    rest = text[matches[0].end() :]
++    nxt = re.search(r"(?m)^(def |class )", rest)
++    end = len(text) if nxt is None else matches[0].end() + nxt.start()
++    return start, end
++
++
++def string_literals(body: str) -> list[tuple[int, int, str]]:
++    found: list[tuple[int, int, str]] = []
++    i = 0
++    while i < len(body):
++        if body[i] not in ("'", '"'):
++            i += 1
++            continue
++        triple = body.startswith(body[i] * 3, i)
++        quote = body[i] * 3 if triple else body[i]
++        end = i + len(quote)
++        chars: list[str] = []
++        while end < len(body) and not body.startswith(quote, end):
++            if body[end] == "\\":
++                chars.append(body[end : end + 2])
++                end += 2
++                continue
++            chars.append(body[end])
++            end += 1
++        if not body.startswith(quote, end):
++            break
++        found.append((i, end + len(quote), "".join(chars)))
++        i = end + len(quote)
++    return found
++
++
++def guard_counts(text: str) -> dict[str, int]:
++    return {guard: text.count(guard) for guard in GUARDS}
++
++
++def needs_guards(text: str) -> bool:
++    counts = guard_counts(text)
++    return all(count == 0 for count in counts.values())
++
++
++def already_guarded(text: str) -> bool:
++    counts = guard_counts(text)
++    return all(count == 1 for count in counts.values())
++
++
++def partial_guard(text: str) -> bool:
++    counts = guard_counts(text)
++    return any(count > 0 for count in counts.values()) and not already_guarded(text)
++
++
++def append_guards(literal: str) -> str:
++    suffix = "\nAND " + "\nAND ".join(GUARDS) + "\n"
++    return literal.rstrip() + suffix
++
++
++def replace_span(text: str, start: int, end: int, replacement: str) -> str:
++    return text[:start] + replacement + text[end:]
++
++
++def analyze(text: str) -> dict:
++    reasons: list[str] = []
++    base_matches = assignment_spans(text, "BASE_WHERE")
++    if len(base_matches) != 1:
++        reasons.append(f"expected exactly one BASE_WHERE assignment, found {len(base_matches)}")
++        return {"ok": False, "reasons": reasons}
++    base = extract_expression(text, base_matches[0].end())
++    if base is None:
++        reasons.append("BASE_WHERE layout is not a single triple-quoted string or parenthesized string concatenation")
++        return {"ok": False, "reasons": reasons}
++    literal, content_start, content_end, _kind = base
++    missing = [marker for marker in MARKERS if marker not in literal]
++    if missing:
++        reasons.append("BASE_WHERE is missing documented markers: " + ", ".join(missing))
++    if partial_guard(literal):
++        reasons.append("BASE_WHERE contains a partial history guard; refusing to guess which copy to keep")
++
++    candidate = function_span(text, "candidate_ids")
++    if candidate is None:
++        reasons.append("expected exactly one candidate_ids function")
++    elif "BASE_WHERE" not in text[candidate[0] : candidate[1]]:
++        reasons.append("candidate_ids does not reference BASE_WHERE")
++
++    hydrate = function_span(text, "fetch_rows")
++    hydrate_literal = None
++    if hydrate is None:
++        reasons.append("expected exactly one fetch_rows function")
++    else:
++        body = text[hydrate[0] : hydrate[1]]
++        if any(needle not in body for needle in HYDRATE_NEEDLES):
++            reasons.append("fetch_rows does not show the documented instanceId and key->>'id' lookup")
++        hits = [item for item in string_literals(body) if "key->>'id'" in item[2]]
++        if len(hits) != 1:
++            reasons.append(f"expected exactly one fetch_rows SQL literal containing key->>'id', found {len(hits)}")
++        else:
++            rel_start, rel_end, sql = hits[0]
++            upper = sql.upper()
++            if '"INSTANCEID"' not in upper and '"instanceId"' not in sql:
++                reasons.append("fetch_rows SQL literal does not include instanceId")
++            if "WHERE" not in upper:
++                reasons.append("fetch_rows SQL literal has no WHERE")
++            if any(token in upper for token in ("ORDER BY", "GROUP BY", "LIMIT")):
++                reasons.append("fetch_rows SQL literal has trailing clauses; appending AND would be ambiguous")
++            if partial_guard(sql):
++                reasons.append("fetch_rows SQL contains a partial history guard")
++            hydrate_literal = (hydrate[0] + rel_start, hydrate[0] + rel_end, sql)
++
++    message_hits = [match.start() for match in re.finditer(r'"Message"', text)]
++    covered: list[tuple[int, int]] = []
++    if candidate is not None:
++        covered.append(candidate)
++    if hydrate is not None:
++        covered.append(hydrate)
++    extras = []
++    for pos in message_hits:
++        if not any(start <= pos < end for start, end in covered):
++            line = text.count("\n", 0, pos) + 1
++            extras.append(line)
++    if extras:
++        reasons.append("unexpected Message query outside BASE_WHERE and fetch_rows at lines " + ", ".join(map(str, extras)))
++
++    queues = [name for name in QUEUE_NAMES if re.search(rf"\b{name}\b", text)]
++    if queues:
++        reasons.append("unsanitized queue symbols present: " + ", ".join(queues))
++
++    base_state = "missing"
++    hydrate_state = "missing"
++    if base is not None and not missing and not partial_guard(literal):
++        base_state = "guarded" if already_guarded(literal) else "open" if needs_guards(literal) else "partial"
++    elif base is not None:
++        base_state = "partial" if partial_guard(literal) else "open"
++    if hydrate_literal is not None and not partial_guard(hydrate_literal[2]):
++        hydrate_state = (
++            "guarded" if already_guarded(hydrate_literal[2]) else "open" if needs_guards(hydrate_literal[2]) else "partial"
++        )
++    elif hydrate_literal is not None:
++        hydrate_state = "partial"
++    if base_state != hydrate_state:
++        reasons.append("BASE_WHERE and fetch_rows guard states do not match")
++    elif base_state not in ("open", "guarded"):
++        reasons.append("history guard is not in a single writable state")
++
++    return {
++        "ok": not reasons and base_state in ("open", "guarded") and hydrate_state in ("open", "guarded"),
++        "reasons": reasons,
++        "base": None
++        if base is None
++        else {
++            "start": content_start,
++            "end": content_end,
++            "literal": literal,
++            "state": base_state,
++            "kind": _kind,
++        },
++        "hydrate": None
++        if hydrate_literal is None
++        else {
++            "start": hydrate_literal[0],
++            "end": hydrate_literal[1],
++            "literal": hydrate_literal[2],
++            "state": hydrate_state,
++        },
++        "coverage": {
++            "baseWhere": base_state == "guarded",
++            "fetchRowsSql": hydrate_state == "guarded",
++            "timestampFilterIsNotProvenanceIsolation": True,
++            "unproven": "No sanitized inventory of in-memory queues was provided. Restarting the watcher is not part of this tool.",
++        },
++    }
++
++
++def patched_text(text: str, report: dict) -> str | None:
++    if not report["ok"]:
++        return None
++    base = report["base"]
++    hydrate = report["hydrate"]
++    if base["state"] == "guarded" and hydrate["state"] == "guarded":
++        return text
++    if base["state"] != "open" or hydrate["state"] != "open":
++        return None
++    base_replacement = append_guards(base["literal"])
++    if base["kind"] == "paren":
++        if '"""' in base_replacement:
++            return None
++        base_replacement = '"""' + base_replacement + '"""'
++    elif base["kind"] != "triple":
++        return None
++    spans = [
++        (base["start"], base["end"], base_replacement),
++        (hydrate["start"], hydrate["end"], _replace_literal(text, hydrate, append_guards(hydrate["literal"]))),
++    ]
++    spans.sort(key=lambda item: item[0], reverse=True)
++    updated = text
++    for start, end, replacement in spans:
++        updated = replace_span(updated, start, end, replacement)
++    return updated
++
++
++def _replace_literal(text: str, hydrate: dict, new_body: str) -> str:
++    raw = text[hydrate["start"] : hydrate["end"]]
++    if raw.startswith('"""') or raw.startswith("'''"):
++        quote = raw[:3]
++        return quote + new_body + quote
++    if raw.startswith("'") or raw.startswith('"'):
++        return raw[0] + new_body + raw[0]
++    raise ValueError("hydrate literal quotes are ambiguous")
++
++
++def public_report(mode: str, changed: bool, report: dict, extra: dict | None = None) -> dict:
++    payload = {
++        "mode": mode,
++        "ok": report["ok"],
++        "changed": changed,
++        "reasons": report["reasons"],
++        "coverage": report.get("coverage", {}),
++        "deployment": "BLOCKED",
++        "direction": "older-than-anchor",
++        "fullOutageRecoveryGuaranteed": False,
++    }
++    if extra:
++        payload.update(extra)
++    return payload
++
++
++def emit(payload: dict, code: int) -> int:
++    sys.stdout.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
++    return code
++
++
++def read_refused(path: Path) -> dict | None:
++    if forbidden(path):
++        return {
++            "mode": "refused",
++            "ok": False,
++            "changed": False,
++            "reasons": ["refusing the documented watcher path; copy the file off the box before dry-run or apply"],
++            "deployment": "BLOCKED",
++            "direction": "older-than-anchor",
++            "fullOutageRecoveryGuaranteed": False,
++        }
++    return None
++
++
++def cmd_check(path: Path, apply: bool) -> int:
++    refused = read_refused(path)
++    if refused:
++        return emit(refused, 3)
++    original = path.read_bytes()
++    text = original.decode("utf-8")
++    report = analyze(text)
++    updated = patched_text(text, report)
++    if not report["ok"] or updated is None:
++        return emit(public_report("dry-run" if not apply else "apply", False, report), 2)
++    changed = updated != text
++    if not apply:
++        return emit(
++            public_report("dry-run", False, report, {"wouldChange": changed, "alreadyApplied": not changed}),
++            0,
++        )
++    if not changed:
++        return emit(public_report("apply", False, report, {"alreadyApplied": True}), 0)
++    backup = Path(str(path) + BACKUP_SUFFIX)
++    sidecar = Path(str(path) + SIDECAR_SUFFIX)
++    if sidecar.exists() or backup.exists():
++        report["reasons"].append("backup already exists; rollback or remove it before another apply")
++        report["ok"] = False
++        return emit(public_report("apply", False, report), 2)
++    backup.write_bytes(original)
++    sidecar.write_text(
++        json.dumps({"sha256": sha256(original), "backup": backup.name}, indent=2) + "\n",
++        encoding="utf-8",
++    )
++    temporary = path.with_suffix(path.suffix + ".watcher-guard.tmp")
++    temporary.write_text(updated, encoding="utf-8")
++    temporary.replace(path)
++    return emit(public_report("apply", True, analyze(updated)), 0)
++
++
++def cmd_rollback(path: Path) -> int:
++    refused = read_refused(path)
++    if refused:
++        return emit(refused, 3)
++    sidecar = Path(str(path) + SIDECAR_SUFFIX)
++    backup = Path(str(path) + BACKUP_SUFFIX)
++    if not sidecar.exists() or not backup.exists():
++        return emit(
++            {
++                "mode": "rollback",
++                "ok": False,
++                "changed": False,
++                "reasons": ["backup sidecar is missing"],
++                "deployment": "BLOCKED",
++                "direction": "older-than-anchor",
++                "fullOutageRecoveryGuaranteed": False,
++            },
++            2,
++        )
++    meta = json.loads(sidecar.read_text(encoding="utf-8"))
++    payload = backup.read_bytes()
++    if sha256(payload) != meta.get("sha256"):
++        return emit(
++            {
++                "mode": "rollback",
++                "ok": False,
++                "changed": False,
++                "reasons": ["backup checksum does not match the sidecar"],
++                "deployment": "BLOCKED",
++                "direction": "older-than-anchor",
++                "fullOutageRecoveryGuaranteed": False,
++            },
++            2,
++        )
++    path.write_bytes(payload)
++    sidecar.unlink()
++    return emit(
++        {
++            "mode": "rollback",
++            "ok": True,
++            "changed": True,
++            "reasons": [],
++            "deployment": "BLOCKED",
++            "direction": "older-than-anchor",
++            "fullOutageRecoveryGuaranteed": False,
++        },
++        0,
++    )
++
++
++def legacy_candidate(row: dict, since: int, skip_types: set[str]) -> bool:
++    """Documented pre-guard filters. Timestamp is not a history-provenance check."""
++    if row.get("messageTimestamp", -1) < since:
++        return False
++    from_me = row.get("fromMe")
++    if from_me is None:
++        from_me = False
++    if from_me is not False:
++        return False
++    if row.get("jidAllowed") is not True:
++        return False
++    if row.get("messageType") in skip_types:
++        return False
++    return True
++
++
++def guarded_candidate(row: dict, since: int, skip_types: set[str]) -> bool:
++    if not legacy_candidate(row, since, skip_types):
++        return False
++    status = row.get("status") or ""
++    provenance = ""
++    message = row.get("message")
++    if isinstance(message, dict):
++        recovery = message.get("_evolutionRecovery") or {}
++        if isinstance(recovery, dict):
++            provenance = recovery.get("provenance") or ""
++    if status == "HISTORY":
++        return False
++    if provenance == "on-demand-history":
++        return False
++    return True
++
++
++def main(argv: list[str] | None = None) -> int:
++    parser = argparse.ArgumentParser(description="Dry-run or apply the watcher history guard on a copied file.")
++    parser.add_argument("--target", required=True)
++    parser.add_argument("--apply", action="store_true", help="Write the copied file. Dry-run is the default.")
++    parser.add_argument("--rollback", action="store_true")
++    args = parser.parse_args(argv)
++    path = Path(args.target)
++    if args.apply and args.rollback:
++        return emit(
++            {
++                "mode": "refused",
++                "ok": False,
++                "changed": False,
++                "reasons": ["apply and rollback are mutually exclusive"],
++                "deployment": "BLOCKED",
++            },
++            2,
++        )
++    if args.rollback:
++        return cmd_rollback(path)
++    return cmd_check(path, apply=args.apply)
++
++
++if __name__ == "__main__":
++    sys.exit(main())
