@@ -34,7 +34,8 @@ lerna-debug.log*
 # Project related
 /instances/*
 !/instances/.gitkeep
-/test/
+/test/*
+!/test/history-recovery/
 /src/env.yml
 /store
 *.env
@@ -44,5 +45,7 @@ lerna-debug.log*
 .DS_Store
 *.DS_Store
 .tool-versions
+__pycache__/
+*.pyc
 
 /prisma/migrations/*

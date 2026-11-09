@@ -10,6 +10,8 @@
     "start:prod": "node dist/main",
     "dev:server": "tsx watch ./src/main.ts",
     "test": "tsx watch ./test/all.test.ts",
+    "test:history-recovery": "tsx --test test/history-recovery/*.test.ts",
+    "test:watcher-guard": "python3 -m unittest tools/history-recovery/test_watcher_guard.py",
     "lint": "eslint --fix --ext .ts src",
     "lint:check": "eslint --ext .ts src",
     "commit": "cz",
